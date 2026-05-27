@@ -1,0 +1,26 @@
+# Arduino / Teensy build artifacts
+build/
+*.hex
+*.elf
+*.bin
+*.eep
+*.lst
+*.map
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Editor / IDE
+.vscode/
+.idea/
+.claude/
+*.swp
+*.bak
+*.tmp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
