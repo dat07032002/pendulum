@@ -26,36 +26,18 @@
 #define ENC_Y_B        8
 
 // Nidec 24H: 100 PPR encoder × 4x quadrature decode = 400 counts per revolution
-const float PPR_X = 100.0;
-const float PPR_Y = 100.0;
 
 const int MAX_PWM_CMD   = 150;
 const int K3_PWM_LIMIT  = 60;
 
 const unsigned long SPEED_UPDATE_US = 10000;
-const float SPEED_ALPHA = 0.35; // 0.2 - 0.5 
+const float SPEED_ALPHA = 0.35;
 
 const unsigned long K3_DELAY_MS = 200;
 const unsigned long K3_RAMP_MS  = 400;
 
 bool wasBalancing = false;
 unsigned long balanceStartTime = 0;
-float k3Scale = 0.0;
-
-// Relay auto-tune (Åström-Hägglund) — one axis at a time
-bool relayTuningX = false;
-bool relayTuningY = false;
-const int           RELAY_D            = 40;     // relay amplitude (PWM units)
-const float         RELAY_K2           = 6.0f;   // damping during relay test
-const unsigned long RELAY_DURATION_MS  = 5000;
-
-unsigned long relay_startTime    = 0;
-unsigned long relay_lastCross_us = 0;
-float relay_periodSum = 0.0f;
-int   relay_periodN   = 0;
-float relay_maxAngle  = 0.0f;
-float relay_minAngle  = 0.0f;
-float relay_prevAngle = 0.0f;
 
 // X controller gains
 float K1_X = 50.0;
@@ -73,7 +55,7 @@ float angleX_integral = 0.0;
 float angleY_integral = 0.0;
 const float INTEGRAL_LIMIT = 5.0;
 
-float loop_time_us = 1000.0;
+const unsigned long LOOP_PERIOD_US = 1000UL;
 float loop_time_s  = 0.001;
 float alpha = 0.15;
 
@@ -104,7 +86,6 @@ unsigned long currentT_us    = 0;
 unsigned long previousT_1_us = 0;
 unsigned long previousT_2_us = 0;
 
-int16_t AcX, AcY, AcZ;
 int32_t GyY, GyZ;
 
 #define accSens     0
@@ -117,18 +98,12 @@ int16_t AcZ_offset = 0;
 
 int16_t GyY_offset = 0;
 int16_t GyZ_offset = 0;
-int32_t GyY_offset_sum = 0;
-int32_t GyZ_offset_sum = 0;
 
 float robot_angleX = 0.0;
 float robot_angleY = 0.0;
 float angleX = 0.0;
 float angleY = 0.0;
-float Acc_angleX = 0.0;
-float Acc_angleY = 0.0;
 
-float gyroZ = 0.0;
-float gyroY = 0.0;
 float gyroZfilt = 0.0;
 float gyroYfilt = 0.0;
 
@@ -148,121 +123,6 @@ float getK3Scale() {
 }
 
 // ======================================================
-// Relay auto-tune (Åström-Hägglund)
-//
-// While active on an axis, the controller for that axis is replaced by
-//   u = d * sign(angle) + RELAY_K2 * gyro
-// which forces a sustained limit-cycle oscillation. We measure:
-//   Tu  = period of oscillation
-//   a   = half peak-to-peak amplitude of angle
-//   Ku  = 4*d / (pi*a)         (describing-function approximation)
-// then print Ziegler-Nichols PID suggestions.
-//
-// The other axis keeps balancing normally.
-// ======================================================
-void relayResetState() {
-  relay_startTime    = millis();
-  relay_lastCross_us = 0;
-  relay_periodSum    = 0.0f;
-  relay_periodN      = 0;
-  relay_maxAngle     = 0.0f;
-  relay_minAngle     = 0.0f;
-  relay_prevAngle    = 0.0f;
-}
-
-void startRelayTuneX() {
-  if (relayTuningX || relayTuningY) { Serial.println(F("Relay already running.")); return; }
-  if (!vertical || !calibrated)     { Serial.println(F("Must be balancing first."));  return; }
-  relayTuningX = true;
-  relayResetState();
-  Serial.println(F("Relay tuning X for 5s — pendulum WILL wobble..."));
-}
-
-void startRelayTuneY() {
-  if (relayTuningX || relayTuningY) { Serial.println(F("Relay already running.")); return; }
-  if (!vertical || !calibrated)     { Serial.println(F("Must be balancing first."));  return; }
-  relayTuningY = true;
-  relayResetState();
-  Serial.println(F("Relay tuning Y for 5s — pendulum WILL wobble..."));
-}
-
-void relayPrintResults(char axis) {
-  if (relay_periodN < 4) {
-    Serial.print(F("Relay ")); Serial.print(axis);
-    Serial.println(F(": too few zero-crossings. Try larger RELAY_D or longer run."));
-    return;
-  }
-  float Tu = relay_periodSum / (float)relay_periodN;
-  float a  = (relay_maxAngle - relay_minAngle) * 0.5f;
-  if (a < 0.1f) { Serial.println(F("Amplitude too small — invalid Ku.")); return; }
-
-  float Ku = 4.0f * (float)RELAY_D / (3.14159f * a);
-
-  Serial.println();
-  Serial.print(F("=== Relay tune ")); Serial.print(axis); Serial.println(F(" result ==="));
-  Serial.print(F("  Ku  = ")); Serial.println(Ku, 2);
-  Serial.print(F("  Tu  = ")); Serial.print(Tu * 1000.0f, 1); Serial.println(F(" ms"));
-  Serial.print(F("  amp = ")); Serial.print(a, 2); Serial.println(F(" deg"));
-  Serial.print(F("  N   = ")); Serial.println(relay_periodN);
-  Serial.println(F("Ziegler-Nichols PID suggestions:"));
-  if (axis == 'X') {
-    Serial.print(F("  K1_X = ")); Serial.println(0.6f   * Ku,      2);
-    Serial.print(F("  KI_X = ")); Serial.println(1.2f   * Ku / Tu, 3);
-    Serial.print(F("  K2_X = ")); Serial.println(0.075f * Ku * Tu, 3);
-    Serial.println(F("Apply:  p <val>   o <val>   i <val>"));
-  } else {
-    Serial.print(F("  K1_Y = ")); Serial.println(0.6f   * Ku,      2);
-    Serial.print(F("  KI_Y = ")); Serial.println(1.2f   * Ku / Tu, 3);
-    Serial.print(F("  K2_Y = ")); Serial.println(0.075f * Ku * Tu, 3);
-    Serial.println(F("Apply:  P <val>   O <val>   I <val>"));
-  }
-  Serial.println(F("=========================="));
-}
-
-// Called once per 1 ms control tick while relayTuningX is true.
-void relayUpdateX() {
-  if (angleX > relay_maxAngle) relay_maxAngle = angleX;
-  if (angleX < relay_minAngle) relay_minAngle = angleX;
-
-  // Zero-crossing detection (sign change)
-  if ((relay_prevAngle <= 0.0f && angleX > 0.0f) ||
-      (relay_prevAngle >= 0.0f && angleX < 0.0f)) {
-    if (relay_lastCross_us != 0) {
-      // Time between two consecutive crossings = Tu/2, so multiply by 2.
-      relay_periodSum += (currentT_us - relay_lastCross_us) * 2e-6f;
-      relay_periodN++;
-    }
-    relay_lastCross_us = currentT_us;
-  }
-  relay_prevAngle = angleX;
-
-  if (millis() - relay_startTime >= RELAY_DURATION_MS) {
-    relayTuningX = false;
-    relayPrintResults('X');
-  }
-}
-
-void relayUpdateY() {
-  if (angleY > relay_maxAngle) relay_maxAngle = angleY;
-  if (angleY < relay_minAngle) relay_minAngle = angleY;
-
-  if ((relay_prevAngle <= 0.0f && angleY > 0.0f) ||
-      (relay_prevAngle >= 0.0f && angleY < 0.0f)) {
-    if (relay_lastCross_us != 0) {
-      relay_periodSum += (currentT_us - relay_lastCross_us) * 2e-6f;
-      relay_periodN++;
-    }
-    relay_lastCross_us = currentT_us;
-  }
-  relay_prevAngle = angleY;
-
-  if (millis() - relay_startTime >= RELAY_DURATION_MS) {
-    relayTuningY = false;
-    relayPrintResults('Y');
-  }
-}
-
-// ======================================================
 // Setup
 // ======================================================
 void setup() {
@@ -279,42 +139,28 @@ void setup() {
 
   analogWrite(PWM_X, 255);
   analogWrite(PWM_Y, 255);
+  digitalWrite(DIRECTION_X, HIGH);
+  digitalWrite(DIRECTION_Y, HIGH);
 
   setupEncoders();
-  delay(1000);
+  delay(200);
 
   EEPROM.get(0, offsets);
   if (offsets.ID == 33) {
     calibrated = true;
+    Serial.println(F("EEPROM offsets loaded"));
   } else {
-    calibrated = false;
     offsets.ID = 0;
     offsets.X  = 0.0f;
     offsets.Y  = 0.0f;
+    Serial.println(F("No calibration — send c+ then c-"));
   }
 
-  Serial.println(F("Starting IMU calibration — hold robot vertical and still..."));
   angle_setup();
-
-  //Serial.println();
-  //Serial.println(F("Commands:"));
-  //Serial.println(F("p+ / p- : K1_X"));
-  //Serial.println(F("o+ / o- : KI_X"));
-  //Serial.println(F("i+ / i- : K2_X"));
-  //Serial.println(F("s+ / s- : K3_X"));
-  //Serial.println(F("P+ / P- : K1_Y"));
-  //Serial.println(F("O+ / O- : KI_Y"));
-  //Serial.println(F("I+ / I- : K2_Y"));
-  //Serial.println(F("S+ / S- : K3_Y"));
-  //Serial.println(F("c+      : calibration ON"));
-  //Serial.println(F("c-      : save balance point"));
-  //Serial.println();
 
   lastSpeedTime_us = micros();
   previousT_1_us   = micros();
   previousT_2_us   = micros();
-
-  printValues();
 }
 
 // ======================================================
@@ -324,7 +170,7 @@ void loop() {
   currentT_us = micros();
 
   // 1 ms control loop
-  if (currentT_us - previousT_1_us >= (unsigned long)loop_time_us) {
+  if (currentT_us - previousT_1_us >= LOOP_PERIOD_US) {
 
     loop_time_s = (currentT_us - previousT_1_us) * 1e-6f;
 
@@ -333,10 +179,8 @@ void loop() {
 
     angle_calc();
 
-    gyroZ = GyZ / 65.536f;
-    gyroY = GyY / 65.536f;
-    gyroZfilt = alpha * gyroZ + (1.0f - alpha) * gyroZfilt;
-    gyroYfilt = alpha * gyroY + (1.0f - alpha) * gyroYfilt;
+    gyroZfilt = alpha * (GyZ / 65.536f) + (1.0f - alpha) * gyroZfilt;
+    gyroYfilt = alpha * (GyY / 65.536f) + (1.0f - alpha) * gyroYfilt;
 
     if (vertical && calibrated) {
       if (!wasBalancing) {
@@ -344,7 +188,7 @@ void loop() {
         wasBalancing = true;
       }
 
-      k3Scale = getK3Scale();
+      float k3Scale = getK3Scale();
 
       angleX_integral += angleX * loop_time_s;
       angleY_integral += angleY * loop_time_s;
@@ -354,29 +198,13 @@ void loop() {
       k3_pwm_X = constrain(-k3Scale * K3_X * wheelSpeedX_cps, -K3_PWM_LIMIT, K3_PWM_LIMIT);
       k3_pwm_Y = constrain(-k3Scale * K3_Y * wheelSpeedY_cps, -K3_PWM_LIMIT, K3_PWM_LIMIT);
 
-      // X axis — relay test or normal control
-      if (relayTuningX) {
-        pwm_X = constrain(
-          (angleX > 0.0f ? RELAY_D : -RELAY_D) + (int)(RELAY_K2 * gyroZfilt),
-          -MAX_PWM_CMD, MAX_PWM_CMD);
-        relayUpdateX();
-      } else {
-        pwm_X = constrain(
-          K1_X * angleX + KI_X * angleX_integral + K2_X * gyroZfilt + k3_pwm_X,
-          -MAX_PWM_CMD, MAX_PWM_CMD);
-      }
+      pwm_X = constrain(
+        K1_X * angleX + KI_X * angleX_integral + K2_X * gyroZfilt + k3_pwm_X,
+        -MAX_PWM_CMD, MAX_PWM_CMD);
 
-      // Y axis — relay test or normal control
-      if (relayTuningY) {
-        pwm_Y = constrain(
-          (angleY > 0.0f ? RELAY_D : -RELAY_D) + (int)(RELAY_K2 * gyroYfilt),
-          -MAX_PWM_CMD, MAX_PWM_CMD);
-        relayUpdateY();
-      } else {
-        pwm_Y = constrain(
-          K1_Y * angleY + KI_Y * angleY_integral + K2_Y * gyroYfilt + k3_pwm_Y,
-          -MAX_PWM_CMD, MAX_PWM_CMD);
-      }
+      pwm_Y = constrain(
+        K1_Y * angleY + KI_Y * angleY_integral + K2_Y * gyroYfilt + k3_pwm_Y,
+        -MAX_PWM_CMD, MAX_PWM_CMD);
 
       if (!calibrating) {
         Motor_controlX(pwm_X);
@@ -399,24 +227,15 @@ void loop() {
       angleY_integral = 0.0f;
 
       wasBalancing = false;
-      k3Scale = 0.0f;
-
-      if (relayTuningX || relayTuningY) {
-        Serial.println(F("Lost balance — relay tune aborted."));
-        relayTuningX = false;
-        relayTuningY = false;
-      }
     }
 
     previousT_1_us = currentT_us;
-  }
 
-  // 500 ms debug print
-  if (currentT_us - previousT_2_us >= 500000UL) {
-    printDebug();
-    if (!calibrated && !calibrating)
-      Serial.println(F("First calibrate balance point with c+ then c-"));
-    previousT_2_us = currentT_us;
+    // 500 ms debug print — runs inside the tick so jitter is absorbed into loop_time_s
+    if (currentT_us - previousT_2_us >= 500000UL) {
+      printDebug();
+      previousT_2_us = currentT_us;
+    }
   }
 }
 
@@ -457,18 +276,14 @@ void processTuneCommand(const char *buf) {
   const char *rest = buf + 1;
   while (*rest == ' ' || *rest == '=' || *rest == '\t') rest++;
 
-  // Calibration (state command, not a value)
   if (param == 'c') {
     if (buf[1] == '+' && !calibrating) {
       calibrating = true;
-      Serial.println(F("Calibrating ON — hold at balance point, then send c-"));
+      Serial.println(F("Calibrating — hold at balance point, send c-"));
       return;
     }
     if (buf[1] == '-' && calibrating) {
       calibrating = false;
-      Serial.print(F("X balance angle: ")); Serial.println(robot_angleX);
-      Serial.print(F("Y balance angle: ")); Serial.println(robot_angleY);
-
       if (abs(robot_angleX) < 30.0f && abs(robot_angleY) < 30.0f) {
         offsets.ID = 33;
         offsets.X  = robot_angleX;
@@ -479,7 +294,7 @@ void processTuneCommand(const char *buf) {
         angleX_integral = 0.0f; angleY_integral = 0.0f;
         wheelSpeedX_cps = 0.0f; wheelSpeedY_cps = 0.0f;
         k3_pwm_X = 0.0f; k3_pwm_Y = 0.0f;
-        wasBalancing = false; k3Scale = 0.0f;
+        wasBalancing = false;
 
         noInterrupts();
         encoderCountX = 0;
@@ -487,9 +302,10 @@ void processTuneCommand(const char *buf) {
         interrupts();
 
         calibrated = true;
-        Serial.println(F("Balance point saved to EEPROM"));
+        Serial.print(F("Saved — X:")); Serial.print(offsets.X, 2);
+        Serial.print(F(" Y:"));        Serial.println(offsets.Y, 2);
       } else {
-        Serial.println(F("Angle out of range — calibration NOT saved."));
+        Serial.println(F("Angle out of range — not saved"));
         calibrated = false;
       }
       return;
@@ -497,23 +313,8 @@ void processTuneCommand(const char *buf) {
     return;
   }
 
-  // Relay auto-tune (state command):  t+ / t-  for X,  T+ / T-  for Y
-  if (param == 't' || param == 'T') {
-    if (buf[1] == '+') {
-      if (param == 't') startRelayTuneX();
-      else              startRelayTuneY();
-    } else if (buf[1] == '-') {
-      if (relayTuningX || relayTuningY) Serial.println(F("Relay tune aborted."));
-      relayTuningX = false;
-      relayTuningY = false;
-    }
-    return;
-  }
-
-  // Print current values
   if (param == '?') { printValues(); return; }
 
-  // Resolve which gain to write
   float *target = nullptr;
   bool clampNonNeg = false;
   switch (param) {
@@ -525,12 +326,9 @@ void processTuneCommand(const char *buf) {
     case 'O': target = &KI_Y; clampNonNeg = true; break;
     case 'I': target = &K2_Y; break;
     case 'S': target = &K3_Y; clampNonNeg = true; break;
-    default:
-      Serial.print(F("Unknown command: ")); Serial.println(buf);
-      return;
+    default: return;
   }
 
-  // Increment shortcuts: e.g. "p+" or "p-" (no value after)
   if (buf[1] == '+' && buf[2] == '\0') {
     float step = (param=='o'||param=='O') ? 0.05f :
                  (param=='i'||param=='I') ? 0.1f  :
@@ -542,11 +340,7 @@ void processTuneCommand(const char *buf) {
                  (param=='s'||param=='S') ? 0.001f : 1.0f;
     *target -= step;
   } else {
-    // Direct value entry
-    if (*rest == '\0') {
-      Serial.println(F("Missing value. Example: p 90.5"));
-      return;
-    }
+    if (*rest == '\0') return;
     *target = atof(rest);
   }
 
@@ -569,28 +363,15 @@ void printValues() {
 }
 
 // ======================================================
-// Print debug
+// Print debug — angle, gyro, PWM, status
 // ======================================================
 void printDebug() {
-  noInterrupts();
-  long countX = encoderCountX;
-  long countY = encoderCountY;
-  interrupts();
-
   Serial.print(F("AX:")); Serial.print(angleX, 2);
   Serial.print(F(" AY:")); Serial.print(angleY, 2);
-  Serial.print(F(" | IX:")); Serial.print(angleX_integral, 2);
-  Serial.print(F(" IY:")); Serial.print(angleY_integral, 2);
-  Serial.print(F(" | GZ:")); Serial.print(gyroZfilt, 1);
+  Serial.print(F(" GZ:")); Serial.print(gyroZfilt, 1);
   Serial.print(F(" GY:")); Serial.print(gyroYfilt, 1);
-  Serial.print(F(" | PWM_X:")); Serial.print(pwm_X);
-  Serial.print(F(" PWM_Y:")); Serial.print(pwm_Y);
-  Serial.print(F(" | K3X:")); Serial.print(k3_pwm_X, 1);
-  Serial.print(F(" K3Y:")); Serial.print(k3_pwm_Y, 1);
-  Serial.print(F(" | encX:")); Serial.print(countX);
-  Serial.print(F(" encY:")); Serial.print(countY);
-  Serial.print(F(" | spdX:")); Serial.print(wheelSpeedX_cps, 0);
-  Serial.print(F(" spdY:")); Serial.print(wheelSpeedY_cps, 0);
-  Serial.print(F(" | vert:")); Serial.print(vertical ? F("1") : F("0"));
-  Serial.print(F(" cal:")); Serial.println(calibrated ? F("1") : F("0"));
+  Serial.print(F(" PX:")); Serial.print(pwm_X);
+  Serial.print(F(" PY:")); Serial.print(pwm_Y);
+  Serial.print(F(" V:")); Serial.print(vertical ? 1 : 0);
+  Serial.print(F(" C:")); Serial.println(calibrated ? 1 : 0);
 }

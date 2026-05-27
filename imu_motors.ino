@@ -81,10 +81,8 @@ void updateEncoderSpeed() {
     long deltaY = countY - lastEncoderCountY;
     float dt = (now_us - lastSpeedTime_us) * 1e-6f;
 
-    if (dt > 0.0f) {
-      wheelSpeedX_cps = SPEED_ALPHA * (deltaX / dt) + (1.0f - SPEED_ALPHA) * wheelSpeedX_cps;
-      wheelSpeedY_cps = SPEED_ALPHA * (deltaY / dt) + (1.0f - SPEED_ALPHA) * wheelSpeedY_cps;
-    }
+    wheelSpeedX_cps = SPEED_ALPHA * (deltaX / dt) + (1.0f - SPEED_ALPHA) * wheelSpeedX_cps;
+    wheelSpeedY_cps = SPEED_ALPHA * (deltaY / dt) + (1.0f - SPEED_ALPHA) * wheelSpeedY_cps;
 
     lastEncoderCountX = countX;
     lastEncoderCountY = countY;
@@ -99,18 +97,18 @@ void updateEncoderSpeed() {
 void angle_setup() {
   Wire.begin();
   Wire.setClock(400000);
-  delay(100);
+  delay(50);
 
   writeTo(MPU6050, PWR_MGMT_1,   0);
   writeTo(MPU6050, 0x1A,         4);  // DLPF: 21 Hz accel / 20 Hz gyro
   writeTo(MPU6050, ACCEL_CONFIG, accSens  << 3);
   writeTo(MPU6050, GYRO_CONFIG,  gyroSens << 3);
-  delay(100);
+  delay(50);
 
   // ---- Gyro offset calibration ----
-  Serial.println(F("Calibrating gyro..."));
-  GyY_offset_sum = 0;
-  GyZ_offset_sum = 0;
+  //Serial.println(F("Calibrating gyro..."));
+  int32_t GyY_offset_sum = 0;
+  int32_t GyZ_offset_sum = 0;
 
   for (int i = 0; i < 1024; i++) {
     Wire.beginTransmission(MPU6050);
@@ -122,16 +120,15 @@ void angle_setup() {
     int32_t gz = (int16_t)((unsigned)Wire.read() << 8 | Wire.read());
     GyY_offset_sum += gy;
     GyZ_offset_sum += gz;
-    delay(5);
   }
   GyY_offset = GyY_offset_sum >> 10;
   GyZ_offset = GyZ_offset_sum >> 10;
-  Serial.print(F("GyY offset = ")); Serial.println(GyY_offset);
-  Serial.print(F("GyZ offset = ")); Serial.println(GyZ_offset);
+  //Serial.print(F("GyY offset = ")); Serial.println(GyY_offset);
+  //Serial.print(F("GyZ offset = ")); Serial.println(GyZ_offset);
 
   // ---- Accelerometer offset calibration ----
   // At vertical: AcX ~ -16384 (1g), AcY ~ 0, AcZ ~ 0
-  Serial.println(F("Calibrating accelerometer..."));
+  //Serial.println(F("Calibrating accelerometer..."));
   int32_t AcX_sum = 0, AcY_sum = 0, AcZ_sum = 0;
 
   for (int i = 0; i < 512; i++) {
@@ -142,7 +139,6 @@ void angle_setup() {
     AcX_sum += (int16_t)((unsigned)Wire.read() << 8 | Wire.read());
     AcY_sum += (int16_t)((unsigned)Wire.read() << 8 | Wire.read());
     AcZ_sum += (int16_t)((unsigned)Wire.read() << 8 | Wire.read());
-    delay(5);
   }
 
   int16_t AcX_mean = AcX_sum >> 9;
@@ -153,28 +149,29 @@ void angle_setup() {
   AcY_offset = -AcY_mean;
   AcZ_offset = -AcZ_mean;
 
-  Serial.print(F("AcX_offset = ")); Serial.println(AcX_offset);
-  Serial.print(F("AcY_offset = ")); Serial.println(AcY_offset);
-  Serial.print(F("AcZ_offset = ")); Serial.println(AcZ_offset);
+  //Serial.print(F("AcX_offset = ")); Serial.println(AcX_offset);
+  //Serial.print(F("AcY_offset = ")); Serial.println(AcY_offset);
+  //Serial.print(F("AcZ_offset = ")); Serial.println(AcZ_offset);
 
   // ---- Reset and settle complementary filter ----
   robot_angleX = 0.0f;
   robot_angleY = 0.0f;
 
-  Serial.println(F("Settling angle filter..."));
-  for (int i = 0; i < 200; i++) {
+  //Serial.println(F("Settling angle filter..."));
+  for (int i = 0; i < 1000; i++) {
     angle_calc();
-    delay(5);
+    delay(1);
   }
 
-  Serial.print(F("Settled angleX = ")); Serial.println(robot_angleX);
-  Serial.print(F("Settled angleY = ")); Serial.println(robot_angleY);
+  //Serial.print(F("Settled angleX = ")); Serial.println(robot_angleX);
+  //Serial.print(F("Settled angleY = ")); Serial.println(robot_angleY);
 }
 
 // ======================================================
 // IMU angle calculation (called every 1 ms)
 // ======================================================
 void angle_calc() {
+  int16_t AcX, AcY, AcZ;
   Wire.beginTransmission(MPU6050);
   Wire.write(0x3B);
   Wire.endTransmission(false);
@@ -194,13 +191,11 @@ void angle_calc() {
   GyZ -= GyZ_offset;
 
   robot_angleX += GyZ * loop_time_s / 65.536f;
-  Acc_angleX    = atan2(AcY, -AcX) * 57.2958f;
-  robot_angleX  = robot_angleX * Gyro_amount + Acc_angleX * (1.0f - Gyro_amount);
+  robot_angleX  = robot_angleX * Gyro_amount + atan2f(AcY, -AcX) * 57.2958f * (1.0f - Gyro_amount);
   angleX        = robot_angleX - offsets.X;
 
   robot_angleY += GyY * loop_time_s / 65.536f;
-  Acc_angleY    = -atan2(AcZ, -AcX) * 57.2958f;
-  robot_angleY  = robot_angleY * Gyro_amount + Acc_angleY * (1.0f - Gyro_amount);
+  robot_angleY  = robot_angleY * Gyro_amount + (-atan2f(AcZ, -AcX) * 57.2958f) * (1.0f - Gyro_amount);
   angleY        = robot_angleY - offsets.Y;
 
   if (abs(angleX) > 10.0f || abs(angleY) > 10.0f) vertical = false;
