@@ -1,0 +1,46 @@
+<mujoco model="furuta_pendulum">
+    <default>
+        <!-- remap SolidWorks Y-up to MuJoCo Z-up -->
+        <geom type="mesh" xyaxes="1 0 0 0 0 1"/>
+    </default>
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
+        <rgba haze="0.15 0.25 0.35 1"/>
+    </visual>
+
+    <asset>
+        <!-- SolidWorks exports in mm, scale to meters -->
+        <!-- refpos re-centers all meshes around the motor's center in SolidWorks global frame (mm) -->
+        <mesh name="fixed_motor"  file="cad/fixed_motor.stl"  scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="arm"          file="cad/arm.stl"          scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="pendulum_rod" file="cad/pendulum_rod.stl" scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+    </asset>
+
+    <worldbody>
+        <!-- lights -->
+        <light pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+        <light pos="0.5 0.5 1" dir="-1 -1 -1" diffuse="0.4 0.4 0.4"/>
+
+        <!-- floor -->
+        <geom name="floor" type="plane" size="1 1 0.1" rgba="0.6 0.6 0.6 1"/>
+
+        <!-- post holding motor at 15cm above floor -->
+        <body name="mount" pos="0 0 0">
+            <geom name="post" type="box" size="0.015 0.015 0.075" pos="0 0 0.075" rgba="0.5 0.5 0.5 1"/>
+        </body>
+
+        <!-- motor fixed to world at 15cm height -->
+        <body name="fixed_motor" pos="0 0 0.15">
+            <geom mesh="fixed_motor"/>
+            <body name="arm">
+                <joint name="shoulder" pos="0.02575 0 0" axis="1 0 0"/>
+                <geom mesh="arm"/>
+                <body name="pendulum_rod">
+                    <joint name="elbow" pos="0.05675 0.04240 0.02556" axis="0 0.857 0.516"/>
+                    <geom mesh="pendulum_rod"/>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+</mujoco>
