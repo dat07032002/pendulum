@@ -1,12 +1,13 @@
 <mujoco model="furuta_pendulum">
     <default>
-        <!-- remap SolidWorks Y-up to MuJoCo Z-up -->
-        <geom type="mesh" xyaxes="1 0 0 0 0 1"/>
+        <!-- remap SolidWorks X-up to MuJoCo Z-up -->
+        <geom type="mesh" xyaxes="0 0 1 1 0 0"/>
     </default>
 
-    <option>
-        <flag contact="disable"/>
-    </option>
+    <contact>
+        <exclude body1="fixed_motor" body2="arm"/>
+        <exclude body1="arm" body2="pendulum_rod"/>
+    </contact>
 
     <visual>
         <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
@@ -18,7 +19,7 @@
         <!-- refpos re-centers all meshes around the motor's center in SolidWorks global frame (mm) -->
         <mesh name="fixed_motor"  file="cad/fixed_motor.stl"  scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
         <mesh name="arm"          file="cad/arm.stl"          scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
-        <mesh name="pendulum_rod" file="cad/pendulum_rod.stl" scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="pendulum_rod" file="cad/rod.stl"          scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
     </asset>
 
     <worldbody>
@@ -28,19 +29,21 @@
 
 <!-- motor fixed to world at 15cm height -->
         <body name="fixed_motor" pos="0 0 0.15">
-            <geom mesh="fixed_motor"/>
+            <geom mesh="fixed_motor" mass="0.04560"/>
             <body name="arm">
-                <joint name="shoulder" pos="0.02575 0 0" axis="1 0 0" damping="0.01"/>
-                <geom mesh="arm"/>
+                <joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
+                       limited="true" range="-2.356 2.356"/>
+                <geom mesh="arm" mass="0.03236"/>
                 <body name="pendulum_rod">
-                    <joint name="elbow" pos="0.05675 0.04240 0.02556" axis="0 0.857 0.516"/>
-                    <geom mesh="pendulum_rod"/>
+                    <!-- ref is degrees by default; this makes qpos[1] = 0 the upright coordinate -->
+                    <joint name="elbow" pos="0.02556 -0.04240 0.05675" axis="0.516 -0.857 0" ref="-7.974"/>
+                    <geom mesh="pendulum_rod" mass="0.02749"/>
                 </body>
             </body>
         </body>
     </worldbody>
 
     <actuator>
-        <motor name="shoulder_motor" joint="shoulder" gear="1" ctrlrange="-1 1" forcerange="-0.147 0.147"/>
+        <motor name="shoulder_motor" joint="shoulder" gear="1" ctrlrange="-1 1" forcerange="-0.132 0.132"/>
     </actuator>
 </mujoco>

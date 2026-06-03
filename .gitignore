@@ -1,26 +1,9 @@
-# Arduino / Teensy build artifacts
-build/
-*.hex
-*.elf
-*.bin
-*.eep
-*.lst
-*.map
-
-# PlatformIO
-.pio/
-.pioenvs/
-.piolibdeps/
-
-# Editor / IDE
-.vscode/
-.idea/
-.claude/
-*.swp
-*.bak
-*.tmp
-*~
-
-# OS
-.DS_Store
-Thumbs.db
+__pycache__/
+*.pyc
+pendulum/MUJOCO_LOG.TXT
+pendulum/models/ppo_furuta_*_steps.zip
+pendulum/models/ppo_furuta_final.zip
+pendulum/models/evaluations.npz
+pendulum/models/vec_normalize.pkl
+pendulum/motor_tests.png
+pendulum/sanity_check.png
