@@ -689,6 +689,339 @@ r = \cos(\theta) - \lambda u^2 - 0.5 \cdot \max(0,\; |\phi| - 2.094)^2
 \noindent with $\lambda = 0.1$ as the planned next training iteration.
 
 %─────────────────────────────────────────────────────────────────────────────
+\section{Control Regularisation}
+
+\subsection{Reward Change}
+
+A control cost term is added to penalise large torques and suppress the arm
+chattering observed during balance:
+
+\begin{equation}
+r = \cos(\theta) - 0.1\,u^2 - 0.5 \cdot \max(0,\; |\phi| - 2.094)^2
+\end{equation}
+
+At maximum torque ($u = 1$) the penalty is $-0.1$ per step, small enough that
+swing-up (which requires large torques briefly) is not significantly impaired,
+while sustained chattering (many steps of moderate torque) becomes expensive.
+
+\subsection{Training Setup}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Total steps     & 3\,000\,000 \\
+Parallel envs   & 4 (\texttt{DummyVecEnv}) \\
+Device          & CPU (\texttt{device="cpu"}) \\
+Training time   & $\sim$23 min at 2133 fps \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{Note on GPU:} PyTorch was upgraded from the CPU-only build to
+\texttt{torch 2.11.0+cu128} (CUDA 12.8) to support the NVIDIA RTX 5070
+(Blackwell architecture). However, Stable-Baselines3's PPO with
+\texttt{MlpPolicy} is faster on CPU than GPU for small networks: the
+overhead of CPU$\leftrightarrow$GPU data transfer exceeds the benefit of
+GPU matrix operations for a $[64, 64]$ MLP. Inference uses \texttt{device="cpu"}
+throughout.
+
+\subsection{Training Results}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Configuration} & \textbf{Best eval reward} & \textbf{Recorded episode} \\
+\midrule
+$\pm135°$ limit, no ctrl cost & 823 / 1000 & 821 / 1000 \\
+$\pm135°$ limit + $-0.1u^2$   & 799 / 1000 & \textbf{811 / 1000} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The reward dropped $\sim$24 points due to the control cost term
+being included in the evaluation score. Arm chattering was visibly reduced.
+The 799 reward model is the baseline for all subsequent training.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Domain Randomisation}
+
+\subsection{Motivation}
+
+The trained policy is optimised for the exact simulation parameters (mass,
+damping, torque constant). Real hardware deviates from these values due to
+manufacturing tolerance, voltage variation, and unmodelled friction.
+Domain randomisation (DR) perturbs physical parameters each episode reset
+so the policy learns control strategies that generalise across the parameter
+distribution, making zero-shot sim-to-real transfer more likely to succeed.
+
+\subsection{Sensor Architecture}
+
+The two joints use fundamentally different sensing hardware, requiring separate
+noise models:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Joint} & \textbf{Sensor} & \textbf{Characteristics} \\
+\midrule
+Shoulder (arm) & Motor built-in magnetic encoder & Pre-gearbox; high effective CPR \\
+               &                                  & ($\sim$260 $\times$ 20 = 5200 eff. CPR); \\
+               &                                  & gear backlash $\sim$1° at output \\
+Elbow (pendulum) & AS5600 (12-bit, 4096 CPR)     & Direct on pivot; absolute; \\
+                 &                                & must differentiate for velocity \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Randomised Parameters}
+
+The following parameters are independently randomised at each episode reset
+when \texttt{domain\_rand=True}:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Range} & \textbf{Physical source} \\
+\midrule
+Arm mass             & $\pm10\%$             & Manufacturing tolerance \\
+Rod mass             & $\pm10\%$             & Manufacturing tolerance \\
+Shoulder damping     & $\pm25\%$             & Bearing friction variation \\
+Elbow damping        & $[0,\ 0.005]$         & Pivot friction (unmeasured) \\
+Motor torque scale   & $\pm10\%$             & Voltage droop, motor variation \\
+Action delay         & 0--1 steps            & ESP-NOW 1--2 ms jitter \\
+Shoulder pos. noise  & $\sigma = 0.017$ rad  & Gear backlash ($\sim$1° at output) \\
+Shoulder vel. noise  & $\sigma = 0.050$ rad/s & Pre-gear encoder, high CPR \\
+Elbow pos. noise     & $\sigma = 0.003$ rad  & AS5600 $\sim$2 LSB \\
+Elbow vel. filter    & $\alpha \in [0.6,\ 0.8]$ & Low-pass filter tuning on ESP32 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Per-Joint Velocity Estimation}
+
+A key sim-to-real gap is velocity estimation. MuJoCo provides \texttt{qvel}
+directly as an integrated state, but on real hardware:
+
+\begin{itemize}
+    \item \textbf{Shoulder}: the motor encoder (pre-gearbox) has high effective
+          CPR, so pulse-counting gives clean velocity with small additive noise.
+    \item \textbf{Elbow}: the AS5600 is an absolute position encoder; velocity
+          must be estimated by differentiating consecutive readings:
+          \begin{equation}
+          \hat{\dot\theta}_t = \alpha \cdot \frac{\theta_t - \theta_{t-1}}{\Delta t}
+          + (1 - \alpha)\,\hat{\dot\theta}_{t-1}
+          \end{equation}
+          This low-pass filter introduces phase lag. During training the filter
+          is simulated in \texttt{\_get\_obs()} with randomised $\alpha$ so the
+          policy learns to handle it. In the eval env (\texttt{domain\_rand=False})
+          raw \texttt{qvel[1]} is used, matching the warm-start model's
+          observation distribution.
+\end{itemize}
+
+\subsection{Training Challenges and Lessons Learned}
+
+\begin{enumerate}
+    \item \textbf{Cold-start failure}: Training from scratch with full DR
+          caused policy collapse by step 50k. The task (swing-up + balance
+          under simultaneous noise, delay, and torque variation) was too hard
+          for the policy to discover from random initialisation.
+
+    \item \textbf{Fix -- warm-start}: Loading the best ctrl-cost model
+          (799 reward) as the starting policy and fine-tuning with DR
+          (\texttt{ent\_coef=0.05}, \texttt{learning\_rate=1e-4}) avoided the
+          cold-start problem. The policy already knew how to swing up;
+          DR fine-tuning only needed to teach robustness.
+
+    \item \textbf{Observation mismatch}: The velocity filter was initially
+          applied unconditionally in \texttt{\_get\_obs()}, changing the
+          eval observation distribution from what the warm-start model expected.
+          Fix: gate the filter inside \texttt{if self.\_domain\_rand}.
+
+    \item \textbf{Delay too aggressive}: \texttt{\_max\_delay = 2} steps
+          (20 ms over a 10 ms control loop) caused unstable fine-tuning.
+          Reduced to \texttt{\_max\_delay = 1}.
+
+    \item \textbf{Spinning failure mode}: One DR run learned to spin the
+          pendulum continuously rather than balance, achieving a small positive
+          reward by briefly passing through upright each revolution. Root cause:
+          the ctrl cost alone was insufficient to discourage continuous rotation
+          under DR conditions where weaker torque made each spin cheaper.
+          A spin cost $-0.001\,\dot\theta^2$ was tested but interfered with
+          swing-up (which requires transiently high $\dot\theta$). Resolved by
+          tightening DR ranges so the ctrl cost was sufficient.
+
+    \item \textbf{Plateau at $\sim$$-65$ to $-75$}: With tighter DR ranges
+          and correct observation gating, the DR fine-tuned model plateaued
+          around $-65$ eval reward and never consistently exceeded the initial
+          warm-start score of $+155$ (measured before any gradient updates).
+          This indicates curriculum DR is necessary for stable improvement.
+\end{enumerate}
+
+\subsection{Best DR Model Result}
+
+The best DR model (saved at step 10k, before fine-tuning degraded it) scored
+$+155$ eval reward (clean conditions) and $+178$ in a recorded episode.
+Visually: smooth arm motion, no spinning, but balance sustained for only
+$\sim$1 second before the pendulum falls. The swing-up is reliable; balance
+under perturbation remains the unsolved challenge.
+
+\subsection{Stopping Criteria}
+
+To avoid wasting compute on plateaued runs, two automatic stopping callbacks
+were added to \texttt{train.py}:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Callback} & \textbf{Trigger} & \textbf{Purpose} \\
+\midrule
+\texttt{StopTrainingOnRewardThreshold} & Eval reward $> 700$ & Stop early on success \\
+\texttt{StopTrainingOnNoModelImprovement} & No new best for 50 evals (500k steps) & Stop on plateau \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%─────────────────────────────────────────────────────────────────────────────
+\subsection{Curriculum Domain Randomisation}
+
+\subsubsection{Motivation}
+
+Jumping directly from a clean warm-start policy to full DR caused the policy to
+collapse within 100--200k steps and never recover (eval reward $-65$ to $-75$,
+vs.\ $+799$ clean). The fix is to \emph{ramp} DR gradually so the policy
+adapts incrementally rather than facing the full perturbation all at once.
+
+\subsubsection{Implementation}
+
+A shared \texttt{schedule} dict (a Python object held in memory and passed to
+all training environments via closure) stores a single scalar \texttt{progress}
+$\in [0, 1]$. \texttt{CurriculumCallback} updates it every step:
+
+\begin{lstlisting}[style=python]
+class CurriculumCallback(BaseCallback):
+    def _on_step(self) -> bool:
+        self._schedule["progress"] = min(
+            1.0, self.num_timesteps / self._curriculum_steps
+        )
+        return True
+\end{lstlisting}
+
+\noindent In \texttt{FurutaPendulumEnv.reset()}, all DR ranges scale linearly
+with \texttt{progress} $p$:
+
+\begin{lstlisting}[style=python]
+if p > 0:
+    self.model.body_mass[2] = nom_arm * uniform(1 - 0.10*p, 1 + 0.10*p)
+    self.model.body_mass[3] = nom_rod * uniform(1 - 0.10*p, 1 + 0.10*p)
+    self.model.dof_damping[0] = nom_damp * uniform(1 - 0.25*p, 1 + 0.25*p)
+    self.model.dof_damping[1] = uniform(0.0, 0.005 * p)
+    self._torque_scale = uniform(1 - 0.10*p, 1 + 0.10*p)
+    delay = int(integers(0, round(p) + 1))   # 0 steps until p>0.5
+    self._filter_alpha = 0.7 + uniform(-0.1*p, 0.1*p)
+\end{lstlisting}
+
+\noindent Observation noise in \texttt{\_get\_obs()} is also gated on $p > 0$,
+so at \texttt{progress=0} the training environment is identical to the clean
+eval environment. The eval environment always uses \texttt{domain\_rand=False},
+keeping evaluation scores comparable across runs.
+
+\subsubsection{Safe Model Storage}
+
+A dedicated \texttt{train\_clean.py} script trains the clean (no-DR) baseline
+and saves all outputs to \texttt{models/clean/}, a directory that \texttt{train.py}
+never writes to. On training completion a timestamped backup is created
+automatically:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{File} & \textbf{Written by} \\
+\midrule
+\texttt{models/clean/best\_model.zip}         & \texttt{train\_clean.py} \\
+\texttt{models/clean/vec\_normalize\_best.pkl} & \texttt{train\_clean.py} \\
+\texttt{models/clean/backup\_<timestamp>/}    & \texttt{train\_clean.py} (on finish) \\
+\texttt{models/best\_model.zip}               & \texttt{train.py} (DR run only) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \texttt{train.py} loads the warm-start weights from
+\texttt{models/clean/best\_model.zip} and saves DR-run checkpoints to
+\texttt{models/}, so the clean baseline can never be overwritten.
+
+\subsubsection{Clean Training Result}
+
+The clean baseline (no DR, fresh PPO from scratch, same hyperparameters as the
+original run) reached \textbf{735 eval reward} at step 750k and triggered the
+early-stop threshold ($> 700$) in approximately 7 minutes on CPU.
+
+\subsubsection{Curriculum DR Training Results}
+
+Three curriculum DR runs were performed, each warm-starting from the clean
+735-reward model:
+
+\begin{center}
+\begin{tabular}{lllrr}
+\toprule
+\textbf{Run} & \textbf{ent\_coef} & \textbf{Curriculum} & \textbf{Best eval} & \textbf{Stopped at} \\
+\midrule
+DR run 1 & 0.05  & 2M steps & \textbf{808} (step 160k) & 1.0M (patience) \\
+DR run 2 & 0.05  & 3M steps & 638 (step 10k)  & 2.5M (patience) \\
+DR run 3 & 0.005 & 3M steps & 737 (step 220k) & 2.5M (patience) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent All three runs share the same pattern: the policy peaks \emph{before}
+DR becomes significant (while \texttt{progress} $\ll 1$) and then degrades
+without recovering. The best model across all runs is \textbf{808 eval reward}
+from DR run 1, saved to \texttt{models/best\_model.zip}.
+
+\subsubsection{Root Cause Analysis}
+
+The warm-start policy peaks early because the DR training gradient updates
+cause it to \emph{forget} precise balance timing before it learns DR robustness.
+Two contributing factors:
+
+\begin{enumerate}
+    \item \textbf{High entropy coefficient} (\texttt{ent\_coef=0.05} vs.\
+          \texttt{0.01} in clean training): the optimiser is penalised for
+          being confident, pushing the policy to explore and abandon the
+          learned balance behaviour. Reducing to \texttt{0.005} (run 3)
+          improved early stability but did not solve the underlying issue.
+    \item \textbf{Patience too short}: with \texttt{min\_evals=50}
+          (original), the no-improvement check fired at 1M steps before the
+          curriculum finished ramping. Extended to \texttt{min\_evals=150}
+          and \texttt{max\_no\_improvement\_evals=100} in later runs (total
+          steps increased to 4M), but the policy still never recovered its
+          clean peak.
+\end{enumerate}
+
+\subsubsection{Next Direction}
+
+The outstanding best result (808 clean eval) will be tested directly on the
+real robot. DR may be unnecessary if the sim-to-real gap is small. If the
+robot fails, the concrete failure mode will inform whether to pursue
+training-from-scratch with curriculum DR (no warm-start conflict) or to
+invest in system identification to tighten DR ranges around true hardware
+values.
+
+\subsubsection{Encoder Zero Calibration}
+
+The elbow joint \texttt{ref="-7.974"} attribute was verified in the MuJoCo
+viewer: at \texttt{qpos[1]=0} the pendulum rod is visually upright. The offset
+is not a bug --- it compensates for the mesh's natural coordinate system so that
+the policy's zero always means upright.
+
+On the real robot, the AS5600 encoder must be calibrated so that it reads zero
+when the rod is held upright. Without this, the policy sees a constant angular
+offset and tries to balance at the wrong angle. The calibration procedure is:
+hold the rod upright at power-on, record the raw encoder value, and subtract it
+from all subsequent readings in firmware.
+
+%─────────────────────────────────────────────────────────────────────────────
 \section{Hardware Platform}
 
 \subsection{Microcontroller}
@@ -740,24 +1073,50 @@ ESP32 on pendulum (encoder read + motor drive)
 %─────────────────────────────────────────────────────────────────────────────
 \section{Next Steps}
 
+\subsection{Completed}
+\begin{itemize}
+    \item[$\checkmark$] Control regularisation ($-0.1u^2$), eval reward 799/1000
+    \item[$\checkmark$] Domain randomisation infrastructure (per-joint noise, action delay, torque scale)
+    \item[$\checkmark$] Warm-start fine-tuning strategy
+    \item[$\checkmark$] Automatic stopping criteria (plateau + threshold)
+    \item[$\checkmark$] CUDA 12.8 PyTorch install (RTX 5070 Blackwell)
+    \item[$\checkmark$] Curriculum DR implementation (\texttt{CurriculumCallback}, scaled DR ranges)
+    \item[$\checkmark$] Safe training pipeline (\texttt{train\_clean.py} $\rightarrow$ \texttt{models/clean/}, timestamped backups)
+    \item[$\checkmark$] Clean baseline retrained: 735 eval reward, saved to \texttt{models/clean/}
+    \item[$\checkmark$] Three curriculum DR runs completed; best result 808/1000 (\texttt{models/best\_model.zip})
+    \item[$\checkmark$] Encoder zero calibration verified in MuJoCo viewer (\texttt{ref="-7.974"} correct)
+\end{itemize}
+
+\subsection{Immediate}
 \begin{enumerate}
-    \item \textbf{Control regularisation} -- add $-\lambda u^2$ penalty
-          ($\lambda = 0.1$) to the reward to suppress arm chattering during
-          balance. Retrain at 3M steps.
-    \item \textbf{Domain randomisation} -- perturb mass ($\pm$15\%), joint
-          damping ($\pm$30\%), and sensor noise each episode during training.
-          This makes the policy robust to sim-to-real mismatch without
-          requiring real-hardware training data.
-    \item \textbf{ESP32 firmware} -- implement encoder read (AS5600 over I$^2$C),
-          motor PWM drive, and ESP-NOW packet handler on the pendulum ESP32.
-    \item \textbf{Bridge firmware} -- implement USB serial $\leftrightarrow$
-          ESP-NOW relay on the second ESP32.
-    \item \textbf{Real-hardware interface} -- replace the MuJoCo \texttt{mj\_step}
-          call with real sensor reads and motor commands, deploying the trained
-          policy over the ESP-NOW link.
-    \item \textbf{System identification} -- tune mass, damping, and joint axis
-          parameters from real pendulum data if zero-shot transfer is
-          insufficient.
+    \item \textbf{Robot deployment} -- test the 808-reward policy
+          (\texttt{models/best\_model.zip} + \texttt{models/vec\_normalize\_best.pkl})
+          on the real hardware. Calibrate the AS5600 encoder zero at startup
+          (hold rod upright, record raw reading, subtract from all future readings).
+          If the policy balances successfully, DR may not be necessary.
+    \item \textbf{System identification} -- if the robot fails, measure pendulum
+          inertia (swing period), arm damping (free deceleration), motor torque
+          constant (step response), pivot friction, and end-to-end latency.
+          Use measurements to tighten DR ranges and retrain.
+    \item \textbf{Train-from-scratch with DR} -- if warm-start + DR continues
+          to fail, train a fresh policy with curriculum DR from step 0
+          (no warm-start conflict). Slower to learn swing-up but avoids
+          the forgetting problem observed in all three warm-start DR runs.
+\end{enumerate}
+
+\subsection{Hardware Deployment}
+\begin{enumerate}
+    \setcounter{enumi}{3}
+    \item \textbf{ESP32 firmware} -- implement AS5600 encoder read (I$^2$C),
+          motor encoder read, motor PWM drive, and ESP-NOW packet handler.
+          Implement low-pass velocity filter matching the simulated $\alpha$.
+    \item \textbf{Bridge firmware} -- USB serial $\leftrightarrow$ ESP-NOW
+          relay on the PC-side ESP32.
+    \item \textbf{Real-hardware interface} -- replace \texttt{mj\_step} with
+          real sensor reads and motor commands; deploy policy over ESP-NOW.
+    \item \textbf{Sim-to-real debugging} -- systematic troubleshooting:
+          verify observation signs, check velocity filter tuning, compare
+          motor response to simulation.
 \end{enumerate}
 
 \begin{thebibliography}{9}

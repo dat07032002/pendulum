@@ -1,3 +1,4 @@
+import collections
 import numpy as np
 import mujoco
 import mujoco.viewer
@@ -16,15 +17,16 @@ class FurutaPendulumEnv(gym.Env):
                    θ = elbow/pendulum angle  (0 = upright, ±π = hanging)
                    φ = shoulder/arm angle    (limited to ±135° = ±2.356 rad)
     Action       : scalar in [-1, 1] → shoulder motor torque
-    Reward       : cos(θ) − 0.5·max(0, |φ|−2.094)²
-                   balance term + soft penalty when arm exceeds ±120°
+    Reward       : cos(θ) − 0.1·u² − 0.5·max(0, |φ|−2.094)²
+                   balance term + control cost + soft joint penalty
     Episode      : 10 s fixed length, no early termination
     Reset        : pendulum hanging down (θ ≈ -π) + small uniform noise
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 50}
 
-    def __init__(self, render_mode: str | None = None, frame_skip: int = 5):
+    def __init__(self, render_mode: str | None = None, frame_skip: int = 5,
+                 domain_rand: bool = True, dr_schedule=None):
         self.model = mujoco.MjModel.from_xml_path(str(XML_PATH))
         self.data = mujoco.MjData(self.model)
 
@@ -50,12 +52,48 @@ class FurutaPendulumEnv(gym.Env):
         self._viewer = None     # interactive viewer (human)
         self._step_count = 0
 
+        # domain randomization
+        self._domain_rand          = domain_rand
+        self._dr_schedule          = dr_schedule   # shared dict {"progress": 0.0..1.0}
+        self._nom_arm_mass         = float(self.model.body_mass[2])
+        self._nom_rod_mass         = float(self.model.body_mass[3])
+        self._nom_shoulder_damping = float(self.model.dof_damping[0])
+        self._max_delay            = 1
+        # elbow velocity filter state (AS5600 must differentiate)
+        self._prev_elbow_angle     = 0.0
+        self._elbow_dot_filtered   = 0.0
+        self._filter_alpha         = 0.7
+        self._torque_scale         = 1.0
+        self._action_buf           = collections.deque([0.0], maxlen=1)
+
     # ------------------------------------------------------------------
     def _get_obs(self) -> np.ndarray:
-        theta = float(self.data.qpos[1])
-        phi = float(self.data.qpos[0])
-        theta_dot = float(self.data.qvel[1])
+        if self._dr_schedule is not None:
+            _p = float(self._dr_schedule["progress"])
+        elif self._domain_rand:
+            _p = 1.0
+        else:
+            _p = 0.0
+
+        # --- Shoulder (motor encoder, pre-gearbox) ---
+        phi     = float(self.data.qpos[0])
         phi_dot = float(self.data.qvel[0])
+        if _p > 0:
+            phi     += self.np_random.normal(0, 0.017)
+            phi_dot += self.np_random.normal(0, 0.05)
+
+        # --- Elbow (AS5600, direct on pivot) ---
+        theta = float(self.data.qpos[1])
+        if _p > 0:
+            theta += self.np_random.normal(0, 0.003)
+            raw_dot = (theta - self._prev_elbow_angle) / self.dt
+            self._elbow_dot_filtered = (self._filter_alpha * raw_dot +
+                                        (1 - self._filter_alpha) * self._elbow_dot_filtered)
+            self._prev_elbow_angle = theta
+            theta_dot = self._elbow_dot_filtered
+        else:
+            theta_dot = float(self.data.qvel[1])
+
         return np.array(
             [np.cos(theta), np.sin(theta), theta_dot, phi, phi_dot],
             dtype=np.float32,
@@ -74,22 +112,50 @@ class FurutaPendulumEnv(gym.Env):
         self.data.qvel[:] = self.np_random.uniform(-noise, noise, 2)
         mujoco.mj_forward(self.model, self.data)
 
+        if self._dr_schedule is not None:
+            p = float(self._dr_schedule["progress"])
+        elif self._domain_rand:
+            p = 1.0
+        else:
+            p = 0.0
+
+        if p > 0:
+            self.model.body_mass[2] = self._nom_arm_mass * self.np_random.uniform(1 - 0.10*p, 1 + 0.10*p)
+            self.model.body_mass[3] = self._nom_rod_mass * self.np_random.uniform(1 - 0.10*p, 1 + 0.10*p)
+            self.model.dof_damping[0] = self._nom_shoulder_damping * self.np_random.uniform(1 - 0.25*p, 1 + 0.25*p)
+            self.model.dof_damping[1] = self.np_random.uniform(0.0, 0.005 * p)
+            self._torque_scale = self.np_random.uniform(1 - 0.10*p, 1 + 0.10*p)
+            delay = int(self.np_random.integers(0, round(p) + 1))
+            self._action_buf = collections.deque([0.0] * (delay + 1), maxlen=delay + 1)
+            self._filter_alpha = 0.7 + self.np_random.uniform(-0.1*p, 0.1*p)
+        else:
+            self._torque_scale = 1.0
+            self._action_buf   = collections.deque([0.0], maxlen=1)
+            self._filter_alpha = 0.7
+
+        # initialize elbow filter state from reset position
+        self._prev_elbow_angle   = float(self.data.qpos[1])
+        self._elbow_dot_filtered = float(self.data.qvel[1])
+
         self._step_count = 0
         return self._get_obs(), {}
 
     # ------------------------------------------------------------------
     def step(self, action):
-        self.data.ctrl[0] = float(np.clip(action[0], -1.0, 1.0))
+        self._action_buf.append(float(np.clip(action[0], -1.0, 1.0)))
+        self.data.ctrl[0] = self._action_buf[0] * self._torque_scale
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
 
         obs = self._get_obs()
         theta = float(self.data.qpos[1])
         phi   = float(self.data.qpos[0])
-        balance  = np.cos(theta)
-        excess   = max(0.0, abs(phi) - self._phi_soft_limit)
-        penalty  = -0.5 * excess ** 2
-        reward   = float(balance + penalty)
+        u         = float(self.data.ctrl[0])
+        balance   = np.cos(theta)
+        ctrl_cost = -0.1 * u ** 2
+        excess    = max(0.0, abs(phi) - self._phi_soft_limit)
+        penalty   = -0.5 * excess ** 2
+        reward    = float(balance + ctrl_cost + penalty)
         self._step_count += 1
         terminated = False
         truncated = self._step_count >= self.max_steps
