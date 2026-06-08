@@ -7,6 +7,7 @@
     <contact>
         <exclude body1="fixed_motor" body2="arm"/>
         <exclude body1="arm" body2="pendulum_rod"/>
+        <exclude body1="fixed_motor" body2="pendulum_rod"/>
     </contact>
 
     <visual>
@@ -18,8 +19,8 @@
         <!-- SolidWorks exports in mm, scale to meters -->
         <!-- refpos re-centers all meshes around the motor's center in SolidWorks global frame (mm) -->
         <mesh name="fixed_motor"  file="cad/fixed_motor.stl"  scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
-        <mesh name="arm"          file="cad/arm.stl"          scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
-        <mesh name="pendulum_rod" file="cad/rod.stl"          scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="arm"          file="cad/arm_2.STL"        scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="pendulum_rod" file="cad/rod_2.STL"        scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
     </asset>
 
     <worldbody>
@@ -31,19 +32,21 @@
         <body name="fixed_motor" pos="0 0 0.15">
             <geom mesh="fixed_motor" mass="0.04560"/>
             <body name="arm">
+                <!-- Joint ranges are degrees by default in MJCF. -->
                 <joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
-                       limited="true" range="-2.356 2.356"/>
-                <geom mesh="arm" mass="0.03236"/>
+                       limited="true" range="-135 135" solreflimit="0.005 1"/>
+                <geom mesh="arm" mass="0.02529"/>
                 <body name="pendulum_rod">
-                    <!-- ref is degrees by default; this makes qpos[1] = 0 the upright coordinate -->
-                    <joint name="elbow" pos="0.02556 -0.04240 0.05675" axis="0.516 -0.857 0" ref="-7.974"/>
-                    <geom mesh="pendulum_rod" mass="0.02749"/>
+                    <!-- qpos[1]=0 is upright; qpos[1]=+/-pi is hanging. -->
+                    <joint name="elbow" pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"/>
+                    <geom mesh="pendulum_rod" mass="0.01888"/>
                 </body>
             </body>
         </body>
     </worldbody>
 
     <actuator>
-        <motor name="shoulder_motor" joint="shoulder" gear="1" ctrlrange="-1 1" forcerange="-0.132 0.132"/>
+        <!-- Normalized control maps linearly to the motor's +/-0.132 N m torque. -->
+        <motor name="shoulder_motor" joint="shoulder" gear="0.132" ctrlrange="-1 1"/>
     </actuator>
 </mujoco>

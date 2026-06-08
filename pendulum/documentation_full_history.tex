@@ -1,0 +1,1270 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{float}
+
+% XML/code listing style
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}
+\definecolor{codegreen}{rgb}{0,0.5,0}
+\definecolor{codepurple}{rgb}{0.5,0,0.5}
+\definecolor{codeblue}{rgb}{0,0,0.7}
+
+\lstdefinestyle{xml}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{codeblue},
+    stringstyle=\color{codegreen},
+    commentstyle=\color{gray}\itshape,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    tabsize=4
+}
+
+\lstdefinestyle{python}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{codeblue}\bfseries,
+    stringstyle=\color{codegreen},
+    commentstyle=\color{gray}\itshape,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    tabsize=4,
+    language=Python
+}
+
+\title{\textbf{Furuta Pendulum: SolidWorks to MuJoCo}\\
+\large Build Documentation}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{System Overview}
+
+The Furuta (rotary inverted) pendulum consists of three rigid bodies:
+
+\begin{itemize}
+    \item \textbf{Fixed motor} -- motor housing, bracket, and bearings, fixed to the world
+    \item \textbf{Rotary arm} -- horizontal arm driven by the motor shaft (1 actuated DOF)
+    \item \textbf{Pendulum rod} -- rod with tip mass, free to swing from the end of the arm (1 passive DOF)
+\end{itemize}
+
+\noindent The system has two joints:
+\begin{itemize}
+    \item \textbf{Shoulder} ($\phi$): arm rotation about the motor shaft axis
+    \item \textbf{Elbow} ($\theta$): pendulum rotation about the pivot at the arm tip
+\end{itemize}
+
+\noindent Motor: \textbf{25GA20E260}, 7.4V DC, 1:20 gear ratio.\\
+Pendulum angle sensor: \textbf{AS5600} magnetic encoder (12-bit).
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{STL Export from SolidWorks}
+
+Each moving body is exported as a separate STL file from the SolidWorks assembly.
+The key requirement is that \textbf{all meshes must be exported in the same global coordinate frame} -- this ensures the relative positions between parts are already encoded in the mesh vertex coordinates.
+
+\subsection*{Files}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{File} & \textbf{Body} & \textbf{Description} \\
+\midrule
+\texttt{fixed\_motor.stl} & fixed\_motor & Motor housing, bracket, bearings \\
+\texttt{arm\_2.STL}       & arm          & Updated rotary arm + flange coupler \\
+\texttt{rod\_2.STL}       & pendulum\_rod & Updated pendulum rod with tip weight \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Coordinate System}
+SolidWorks uses \textbf{X-up} as the vertical axis, while MuJoCo uses \textbf{Z-up}.
+The remapping is applied globally via the \texttt{<default>} geom:
+
+\begin{lstlisting}[style=xml]
+<default>
+    <geom type="mesh" xyaxes="0 0 1 1 0 0"/>
+</default>
+\end{lstlisting}
+
+\noindent This defines the mesh local axes in world frame:
+\begin{itemize}
+    \item Mesh local X $\rightarrow$ World Z (up)
+    \item Mesh local Y $\rightarrow$ World X
+    \item Mesh local Z $\rightarrow$ World Y (derived as cross product)
+\end{itemize}
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Mesh Re-centering with \texttt{refpos}}
+
+SolidWorks exports meshes at their global assembly coordinates.
+The motor center in the SolidWorks assembly is at $(602.303,\ 877.409,\ 1307.925)$ mm.
+To re-center all meshes at the body origin, \texttt{refpos} subtracts this offset from all vertex positions:
+
+\begin{lstlisting}[style=xml]
+<asset>
+    <mesh name="fixed_motor" file="cad/fixed_motor.stl"
+          scale="0.001 0.001 0.001"
+          refpos="602.303 877.409 1307.925"/>
+    <mesh name="arm" file="cad/arm_2.STL"
+          scale="0.001 0.001 0.001"
+          refpos="602.303 877.409 1307.925"/>
+    <mesh name="pendulum_rod" file="cad/rod_2.STL"
+          scale="0.001 0.001 0.001"
+          refpos="602.303 877.409 1307.925"/>
+</asset>
+\end{lstlisting}
+
+\noindent Notes:
+\begin{itemize}
+    \item \texttt{scale="0.001 0.001 0.001"} converts SolidWorks mm $\rightarrow$ MuJoCo meters
+    \item All three meshes use the same \texttt{refpos} so they remain correctly assembled
+\end{itemize}
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Kinematic Structure}
+
+The bodies are nested to reflect the kinematic chain:
+
+\begin{lstlisting}[style=xml]
+<body name="fixed_motor" pos="0 0 0.15">        <!-- fixed to world -->
+    <body name="arm">
+        <joint name="shoulder" .../>             <!-- DOF 1 -->
+        <body name="pendulum_rod">
+            <joint name="elbow" .../>            <!-- DOF 2 -->
+        </body>
+    </body>
+</body>
+\end{lstlisting}
+
+\noindent The \texttt{fixed\_motor} body is placed at $z = 0.15$ m above the world origin.
+Since it has no joint, it is rigidly fixed to the world.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Joint Definitions}
+
+\subsection{Shoulder Joint}
+
+The shoulder joint allows the arm to rotate about the motor shaft axis.
+The motor shaft center was measured in SolidWorks at $(628.05,\ 877.41,\ 1307.92)$ mm.
+After \texttt{refpos} subtraction and coordinate remapping, the joint anchor is:
+
+\begin{equation}
+\text{pos} = (0,\ 0,\ 0.02575) \text{ m}
+\end{equation}
+
+\noindent The shaft is aligned with the world Z-axis (vertical axis in SolidWorks $\rightarrow$ world Z in MuJoCo):
+
+\begin{lstlisting}[style=xml]
+<joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
+       limited="true" range="-135 135" solreflimit="0.005 1"/>
+\end{lstlisting}
+
+\subsection{Elbow Joint}
+
+The elbow joint allows the pendulum to swing freely from the arm tip.  After
+switching from the original \texttt{arm}/\texttt{rod} CAD to
+\texttt{arm\_2}/\texttt{rod\_2}, the pivot and axis were updated to match the
+new assembly.  The current convention uses \texttt{ref="0"}:
+
+\begin{lstlisting}[style=xml]
+<joint name="elbow" pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"/>
+\end{lstlisting}
+
+\noindent With this convention:
+\begin{itemize}
+    \item $\theta = 0$ rad: pendulum upright (unstable equilibrium / balance target)
+    \item $\theta = \pm\pi$ rad: pendulum hanging down (stable equilibrium)
+\end{itemize}
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Physical Properties}
+
+\subsection{Mass}
+
+Masses were measured on a scale and set directly on each \texttt{<geom>}:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Body} & \textbf{Measured mass (g)} & \textbf{XML value (kg)} \\
+\midrule
+fixed\_motor  & 45.60 & 0.04560 \\
+arm           & 25.29 & 0.02529 \\
+pendulum\_rod & 18.88 & 0.01888 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The listed values are the current XML masses for the updated
+\texttt{arm\_2.STL} and \texttt{rod\_2.STL} geometry.
+
+\subsection{Inertia}
+
+Inertia tensors are computed automatically by MuJoCo from the mesh geometry and the assigned mass.
+No manual inertia specification is required.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Actuator}
+
+The motor is modeled as a direct torque actuator on the shoulder joint.
+Torque limits are derived from the motor datasheet (25GA20E260):
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Source} \\
+\midrule
+Rated torque  & 0.039 Nm & $0.4 \text{ kg.cm} \times 0.0981$ \\
+Stall torque  & 0.147 Nm & $1.5 \text{ kg.cm} \times 0.0981$ \\
+Gear ratio    & 1:20     & datasheet \\
+Gearbox efficiency & 90\% & assumed \\
+Effective max torque & 0.132 Nm & $0.147 \times 0.90$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{lstlisting}[style=xml]
+<actuator>
+    <motor name="shoulder_motor" joint="shoulder"
+           gear="0.132" ctrlrange="-1 1"/>
+</actuator>
+\end{lstlisting}
+
+\noindent Control input is normalized: $u \in [-1, 1]$ maps linearly to
+$[-0.132, 0.132]$ Nm through the motor \texttt{gear} value.
+Joint damping of 0.01 Nm$\cdot$s/rad approximates gearbox friction.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Contact Exclusions}
+
+Adjacent bodies in the kinematic chain overlap at the joint locations by design (shaft inside bearing, etc.).
+To prevent spurious internal contact forces, neighboring body pairs are excluded:
+
+\begin{lstlisting}[style=xml]
+<contact>
+    <exclude body1="fixed_motor" body2="arm"/>
+    <exclude body1="arm"         body2="pendulum_rod"/>
+    <exclude body1="fixed_motor" body2="pendulum_rod"/>
+</contact>
+\end{lstlisting}
+
+\noindent All three body pairs are currently excluded to prevent CAD overlap
+from creating spurious contact forces during training.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Complete XML Model}
+
+\begin{lstlisting}[style=xml]
+<mujoco model="furuta_pendulum">
+    <default>
+        <!-- remap SolidWorks X-up to MuJoCo Z-up -->
+        <geom type="mesh" xyaxes="0 0 1 1 0 0"/>
+    </default>
+
+    <contact>
+        <exclude body1="fixed_motor" body2="arm"/>
+        <exclude body1="arm" body2="pendulum_rod"/>
+        <exclude body1="fixed_motor" body2="pendulum_rod"/>
+    </contact>
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3"
+                   specular="0.1 0.1 0.1"/>
+        <rgba haze="0.15 0.25 0.35 1"/>
+    </visual>
+
+    <asset>
+        <mesh name="fixed_motor" file="cad/fixed_motor.stl"
+              scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="arm" file="cad/arm_2.STL"
+              scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="pendulum_rod" file="cad/rod_2.STL"
+              scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+        <light pos="0.5 0.5 1" dir="-1 -1 -1" diffuse="0.4 0.4 0.4"/>
+
+        <body name="fixed_motor" pos="0 0 0.15">
+            <geom mesh="fixed_motor" mass="0.04560"/>
+            <body name="arm">
+                <joint name="shoulder" pos="0 0 0.02575"
+                       axis="0 0 1" damping="0.01"
+                       limited="true" range="-135 135" solreflimit="0.005 1"/>
+                <geom mesh="arm" mass="0.02529"/>
+                <body name="pendulum_rod">
+                    <joint name="elbow" pos="0 -0.049505 0.056747"
+                           axis="0 1 0" ref="0"/>
+                    <geom mesh="pendulum_rod" mass="0.01888"/>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <motor name="shoulder_motor" joint="shoulder"
+               gear="0.132" ctrlrange="-1 1"/>
+    </actuator>
+</mujoco>
+\end{lstlisting}
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Sanity Checks}
+
+Three physics sanity checks were performed with the shoulder joint locked
+(arm fixed, pendulum swinging freely):
+
+\subsection{Pendulum Period}
+
+For a simple pendulum: $T = 2\pi\sqrt{L/g}$, where $L$ is the distance from pivot to center of mass.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Current pivot-to-CoM distance & 3.60 cm \\
+Theoretical period $T$ & 0.381 s \\
+Simulated period & Re-check after final CAD freeze \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The pivot-to-CoM distance is computed from the current MuJoCo body
+frame values:
+\texttt{rod\_COM=[0,\ -0.035077,\ 0.089760]} m and
+\texttt{elbow\_pos=[0,\ -0.049505,\ 0.056747]} m.
+
+\subsection{Visual Inspection}
+
+The pendulum oscillates smoothly around its stable equilibrium with no jitter or instability.
+Contact exclusions prevent internal collision forces between adjacent bodies.
+
+\subsection{Energy Conservation}
+
+The current elbow joint has no explicit damping in XML.  Releasing the
+pendulum from 40$^\circ$ past equilibrium should therefore be used as a
+final sanity check after the CAD and contact exclusions are frozen:
+\begin{itemize}
+    \item Expected behaviour: smooth swing with no jitter or artificial contact loss
+    \item Any measured real-hardware decay should be used to identify pivot friction
+\end{itemize}
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Angle Convention}
+
+With the current \texttt{ref="0"} elbow joint, the angle convention is:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{qpos[1]} & \textbf{Physical meaning} \\
+\midrule
+$0$ rad & Pendulum upright (balance target, unstable equilibrium) \\
+$\pm\pi$ rad & Pendulum hanging down (stable equilibrium) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{qpos[0]} (shoulder) has no special reference -- $0$ corresponds to the arm's initial assembly position in SolidWorks.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Gymnasium Environment}
+
+The MuJoCo model is wrapped as a \texttt{gymnasium.Env} in \texttt{furuta\_env.py},
+providing a standard reinforcement learning interface.
+
+\subsection{Observation Space}
+
+The 5-dimensional observation vector is:
+
+\begin{equation}
+\mathbf{o} = \bigl[\cos\theta,\ \sin\theta,\ \dot\theta,\ \phi,\ \dot\phi\bigr]
+\end{equation}
+
+\noindent where $\theta = \texttt{qpos[1]}$ (elbow/pendulum) and
+$\phi = \texttt{qpos[0]}$ (shoulder/arm).
+The angle $\theta$ is encoded as $(\cos\theta, \sin\theta)$ rather than the raw
+angle to avoid the $\pm\pi$ discontinuity.
+
+\subsection{Observation Bounds}
+
+Velocity bounds are derived from the physical hardware, not set to infinity:
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+\textbf{Component} & \textbf{Derivation} & \textbf{Raw limit} & \textbf{Bound (1.5$\times$)} \\
+\midrule
+$\cos\theta,\ \sin\theta$ & trigonometric & $\pm 1$ & $\pm 1$ \\
+$\dot\theta$ & free fall from upright (energy conservation) & 36.6 rad/s & $\pm 55$ rad/s \\
+$\phi$ & shoulder hard limit $\pm135^\circ$ & $\pm2.356$ rad & $\pm2.5$ rad \\
+$\dot\phi$ & terminal speed $= \tau_{\max}/b = 0.132/0.01$ & 13.2 rad/s & $\pm20$ rad/s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent A 1.5$\times$ safety margin covers transient states (e.g.\ energy coupling
+during swing-up) that briefly exceed steady-state limits.
+
+\subsection{Action Space}
+
+A scalar $u \in [-1,\ 1]$ is passed directly to the shoulder motor actuator.
+The MuJoCo motor \texttt{gear="0.132"} maps this linearly to
+$[-0.132,\ 0.132]$ Nm.
+
+\subsection{Reward}
+
+The dense reward at each step is:
+
+\begin{equation}
+r = \cos(\theta) - 0.1u^2 - 0.5\max(0,\ |\phi|-2.094)^2
+\end{equation}
+
+\noindent This gives $r = +1$ when the pendulum is perfectly upright ($\theta = 0$)
+with zero control effort and shoulder angle inside the soft limit.  The
+control penalty discourages chattering, and the shoulder soft-limit penalty
+activates beyond $\pm120^\circ$ before the hard $\pm135^\circ$ joint limit.
+
+\subsection{Episode Structure}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+MuJoCo timestep & 2 ms (default) \\
+Frame skip & 5 \\
+Control period & 10 ms \\
+Episode length & 3000 steps (30 s) for current training runs \\
+Termination & None (truncated at fixed episode length only) \\
+Maximum return & $+3000$ for 30 s with perfect upright/zero effort \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Reset}
+
+Each episode resets the pendulum to the hanging-down position with small
+uniform noise:
+
+\begin{align}
+\phi_0 &\sim \mathcal{U}(-0.05,\ 0.05) \text{ rad} \\
+\theta_0 &= -\pi + \mathcal{U}(-0.05,\ 0.05) \text{ rad} \\
+\dot\phi_0,\ \dot\theta_0 &\sim \mathcal{U}(-0.05,\ 0.05) \text{ rad/s}
+\end{align}
+
+\subsection{Environment Validation}
+
+Eleven automated tests were run to verify correctness:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Test} & \textbf{What is checked} & \textbf{Result} \\
+\midrule
+Observation shape     & Shape is $(5,)$                               & PASS \\
+Trig identity         & $\cos^2\theta + \sin^2\theta = 1$             & PASS \\
+Reset position        & $\cos\theta \approx -1$ after reset           & PASS \\
+Initial velocity      & $|\dot\theta|, |\dot\phi| < 0.2$ rad/s        & PASS \\
+Upright reward        & $r = +1$ when $\theta = 0$                    & PASS \\
+Hanging reward        & $r = -1$ when $\theta = \pm\pi$               & PASS \\
+Episode length        & Fixed by \texttt{episode\_seconds}             & PASS \\
+Termination flags     & \texttt{terminated=False, truncated=True}     & PASS \\
+$\dot\theta$ bound    & Peak $|\dot\theta| < 55$ rad/s over 20 episodes & PASS \\
+$\dot\phi$ bound      & Peak $|\dot\phi| < 20$ rad/s over 20 episodes  & PASS \\
+Determinism           & Same seed produces identical trajectory        & PASS \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The bounds stress test applied alternating maximum torque ($u = \pm 1$) for
+20 full episodes. Peak velocities observed: $|\dot\theta|_{\max} = 13.3$ rad/s
+(76\% headroom) and $|\dot\phi|_{\max} = 14.0$ rad/s (30\% headroom).
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Reinforcement Learning: PPO Training}
+
+\subsection{Algorithm}
+
+Proximal Policy Optimisation (PPO) \cite{schulman2017proximal} is a model-free,
+on-policy actor-critic algorithm. At each iteration it:
+\begin{enumerate}
+    \item Collects $N_{\text{envs}} \times n_{\text{steps}}$ transitions using the
+          current policy.
+    \item Estimates advantages using Generalised Advantage Estimation (GAE).
+    \item Performs $n_{\text{epochs}}$ gradient updates with a clipped surrogate
+          objective:
+          \begin{equation}
+          \mathcal{L}^{\text{CLIP}} =
+          \mathbb{E}\Bigl[\min\bigl(r_t(\theta)\hat{A}_t,\;
+          \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\bigr)\Bigr]
+          \end{equation}
+          where $r_t(\theta) = \pi_\theta(a_t|s_t)/\pi_{\theta_{\text{old}}}(a_t|s_t)$
+          and $\epsilon = 0.2$.
+\end{enumerate}
+
+\noindent The clipping prevents any single update from changing the policy too
+drastically, ensuring stable learning without a trust-region constraint.
+
+\subsection{Observation Normalisation}
+
+Observations are normalised online using \texttt{VecNormalize}
+(Stable-Baselines3). Running mean and variance are maintained across all
+parallel environments. At each step:
+
+\begin{equation}
+\tilde{o}_i = \text{clip}\!\left(\frac{o_i - \mu_i}{\sigma_i},\ -10,\ +10\right)
+\end{equation}
+
+\noindent This is critical because the observation vector mixes dimensionless
+trigonometric values ($\cos\theta, \sin\theta \in [-1,1]$) with velocities in
+rad/s and an unbounded angle $\phi$. Without normalisation the value network
+faces a $\sim\!100\times$ scale difference between dimensions.
+
+\textbf{Important:} the normalisation statistics are saved at the exact moment
+the best model checkpoint is written (via \texttt{callback\_on\_new\_best}),
+ensuring the statistics are always synchronised with the corresponding model
+weights.
+
+\subsection{Hyperparameters}
+
+\begin{center}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Rationale} \\
+\midrule
+\texttt{n\_envs}        & 4                   & parallel data collection \\
+\texttt{n\_steps}       & 2048                & $\sim$20 s of data per env per update \\
+\texttt{batch\_size}    & 64                  & standard mini-batch \\
+\texttt{n\_epochs}      & 10                  & reuse each rollout 10 times \\
+\texttt{gamma}          & 0.99                & long horizon, dense reward \\
+\texttt{gae\_lambda}    & 0.95                & GAE bias-variance trade-off \\
+\texttt{ent\_coef}      & 0.01                & entropy bonus for exploration during swing-up \\
+\texttt{learning\_rate} & $3\times10^{-4}$    & Adam optimiser default \\
+\texttt{clip\_range}    & 0.2                 & PPO clipping parameter $\epsilon$ \\
+\texttt{total\_timesteps} & 3\,000\,000       & $\sim$24 min on CPU \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Training Results}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Milestone} & \textbf{Steps} & \textbf{Eval reward} \\
+\midrule
+Random policy (baseline)  & 0            & $-850$ \\
+Begins learning swing-up  & $\sim$20k    & $+8$   \\
+Consistent balance        & $\sim$370k   & $+933$ \\
+Converged                 & 3\,000\,000  & $\mathbf{+946}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The best model achieved an evaluation reward of $\mathbf{946 / 1000}$
+across 5 deterministic episodes, corresponding to the pendulum remaining within
+the upright zone for approximately 94.6\% of the 10-second episode.
+Swing-up from the hanging position occurs in approximately 0.62 seconds.
+Training speed on a standard laptop CPU is approximately 2100 steps/s,
+requiring no GPU. The policy network is a two-layer MLP with 64 units per layer.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Arm Joint Limit Constraint}
+
+\subsection{Motivation}
+
+On real hardware, continuous 360° arm rotation is not possible due to cable
+wrap and mechanical stops. The shoulder joint is therefore limited to
+$\pm135°$ (270° total travel), matching the physical hardware constraint.
+
+\subsection{Model Change}
+
+The joint limit is enforced in MuJoCo by adding \texttt{limited} and
+\texttt{range} attributes to the shoulder joint:
+
+\begin{lstlisting}[style=xml]
+<joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
+       limited="true" range="-2.356 2.356"/>
+\end{lstlisting}
+
+\noindent MuJoCo enforces this as a hard constraint force at $\pm2.356$ rad
+($\pm135°$). The observation space bound for $\phi$ is updated from $\pm\infty$
+to $\pm2.5$ rad accordingly.
+
+\subsection{Reward Shaping}
+
+A soft penalty activates when the arm exceeds $\pm120°$ (2.094 rad), growing
+quadratically toward the hard stop:
+
+\begin{equation}
+r = \underbrace{\cos(\theta)}_{\text{balance}}
+  - \underbrace{0.5 \cdot \max(0,\; |\phi| - 2.094)^2}_{\text{joint limit penalty}}
+\end{equation}
+
+\noindent The penalty is zero throughout the central $\pm120°$ zone and reaches
+only $-0.034$ at the hard stop ($\pm135°$), so it steers the policy away from
+the wall without significantly interfering with the balance objective.
+
+\subsection{Training Results with Joint Limit}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Milestone} & \textbf{Steps} & \textbf{Eval reward} \\
+\midrule
+Random policy (baseline)  & 0            & $-850$ \\
+Swing-up learned          & $\sim$20k    & $-73$  \\
+Consistent balance        & $\sim$500k   & $+574$ \\
+Temporary regression (adapting to limit) & $\sim$550k & $+150$ \\
+Recovered and converged   & 3\,000\,000  & $\mathbf{+823}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The joint limit costs approximately 123 reward points compared to the
+unconstrained run (946 $\rightarrow$ 823), reflecting reduced arm freedom for
+swing-up and balance corrections. The temporary regression at $\sim$550k steps
+is characteristic of the policy reshaping its swing-up strategy from wide
+rotational sweeps to tighter oscillations within the $\pm135°$ envelope.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Configuration} & \textbf{Best eval reward} & \textbf{Episode reward} \\
+\midrule
+No joint limit  & 946 / 1000 & 947 / 1000 \\
+$\pm135°$ limit & 823 / 1000 & 821 / 1000 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Residual Chattering}
+
+Despite achieving 82\% upright time, the policy exhibits visible arm chattering
+(rapid small oscillations) during balance. This is expected for three reasons:
+
+\begin{enumerate}
+    \item \textbf{No control cost in reward} -- the reward $\cos(\theta)$
+          depends only on pendulum angle, not on how much the arm moves.
+          The policy has no incentive to use smooth corrections over aggressive ones.
+    \item \textbf{Joint limit pressure} -- with $\pm135°$ the arm is more
+          constrained, leading to sharper corrections to stay within bounds.
+    \item \textbf{Unstable equilibrium} -- any deviation from $\theta=0$
+          is amplified by gravity, requiring continuous active correction.
+\end{enumerate}
+
+\noindent The standard fix is \textbf{control regularisation}: adding an
+$-\lambda u^2$ term to penalise large torques, encouraging smooth corrections:
+
+\begin{equation}
+r = \cos(\theta) - \lambda u^2 - 0.5 \cdot \max(0,\; |\phi| - 2.094)^2
+\end{equation}
+
+\noindent with $\lambda = 0.1$ as the planned next training iteration.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Control Regularisation}
+
+\subsection{Reward Change}
+
+A control cost term is added to penalise large torques and suppress the arm
+chattering observed during balance:
+
+\begin{equation}
+r = \cos(\theta) - 0.1\,u^2 - 0.5 \cdot \max(0,\; |\phi| - 2.094)^2
+\end{equation}
+
+At maximum torque ($u = 1$) the penalty is $-0.1$ per step, small enough that
+swing-up (which requires large torques briefly) is not significantly impaired,
+while sustained chattering (many steps of moderate torque) becomes expensive.
+
+\subsection{Training Setup}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Total steps     & 3\,000\,000 \\
+Parallel envs   & 4 (\texttt{DummyVecEnv}) \\
+Device          & CPU (\texttt{device="cpu"}) \\
+Training time   & $\sim$23 min at 2133 fps \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \textbf{Note on GPU:} PyTorch was upgraded from the CPU-only build to
+\texttt{torch 2.11.0+cu128} (CUDA 12.8) to support the NVIDIA RTX 5070
+(Blackwell architecture). However, Stable-Baselines3's PPO with
+\texttt{MlpPolicy} is faster on CPU than GPU for small networks: the
+overhead of CPU$\leftrightarrow$GPU data transfer exceeds the benefit of
+GPU matrix operations for a $[64, 64]$ MLP. Inference uses \texttt{device="cpu"}
+throughout.
+
+\subsection{Training Results}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Configuration} & \textbf{Best eval reward} & \textbf{Recorded episode} \\
+\midrule
+$\pm135°$ limit, no ctrl cost & 823 / 1000 & 821 / 1000 \\
+$\pm135°$ limit + $-0.1u^2$   & 799 / 1000 & \textbf{811 / 1000} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The reward dropped $\sim$24 points due to the control cost term
+being included in the evaluation score. Arm chattering was visibly reduced.
+The 799 reward model is the baseline for all subsequent training.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Domain Randomisation}
+
+\subsection{Motivation}
+
+The trained policy is optimised for the exact simulation parameters (mass,
+damping, torque constant). Real hardware deviates from these values due to
+manufacturing tolerance, voltage variation, and unmodelled friction.
+Domain randomisation (DR) perturbs physical parameters each episode reset
+so the policy learns control strategies that generalise across the parameter
+distribution, making zero-shot sim-to-real transfer more likely to succeed.
+
+\subsection{Sensor Architecture}
+
+The two joints use fundamentally different sensing hardware, requiring separate
+noise models:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Joint} & \textbf{Sensor} & \textbf{Characteristics} \\
+\midrule
+Shoulder (arm) & Motor built-in magnetic encoder & Pre-gearbox; high effective CPR \\
+               &                                  & ($\sim$260 $\times$ 20 = 5200 eff. CPR); \\
+               &                                  & gear backlash $\sim$1° at output \\
+Elbow (pendulum) & AS5600 (12-bit, 4096 CPR)     & Direct on pivot; absolute; \\
+                 &                                & must differentiate for velocity \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Current DR Profile}
+
+The current default DR profile in \texttt{train.py} is
+\texttt{real\_ready\_stage2}.  It extends \texttt{real\_ready} with small
+encoder zero-offset randomisation.  The profile still excludes elbow velocity
+filtering, because filter lag reduced success rate.
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{\texttt{real\_ready\_stage2} range} & \textbf{Reason} \\
+\midrule
+Arm/rod mass and inertia & $\pm5\%$ & CAD/scale uncertainty until measured \\
+Shoulder damping         & $\pm5\%$ & Small gearbox/friction variation \\
+Motor gear/torque scale  & $\pm5\%$ & Voltage and motor variation \\
+Action delay             & 0--1 control steps & ESP-NOW/serial timing margin \\
+Shoulder position noise  & $\sigma = 0.017$ rad & Gear backlash ($\sim$1 degree) \\
+Shoulder velocity noise  & $\sigma = 0.050$ rad/s & Encoder velocity estimate \\
+Elbow position noise     & $\sigma = 0.001$ rad & Small AS5600 absolute-angle noise \\
+Elbow damping            & $[0,\ 0.00002]$ Nm s/rad & Tiny realistic pivot friction \\
+Shoulder zero offset     & $\pm1^\circ$ & Encoder/calibration offset tolerance \\
+Elbow zero offset        & $\pm0.5^\circ$ & AS5600 upright calibration tolerance \\
+Elbow velocity filter    & Excluded & Adds phase lag; test separately \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Superseded older values are kept below only as historical context
+from the first DR design; they should not be used for the current training run:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Parameter} & \textbf{Range} & \textbf{Physical source} \\
+\midrule
+Arm mass             & $\pm10\%$             & Manufacturing tolerance \\
+Rod mass             & $\pm10\%$             & Manufacturing tolerance \\
+Shoulder damping     & $\pm25\%$             & Bearing friction variation \\
+Elbow damping        & $[0,\ 0.005]$         & Pivot friction (unmeasured) \\
+Motor torque scale   & $\pm10\%$             & Voltage droop, motor variation \\
+Action delay         & 0--1 steps            & ESP-NOW 1--2 ms jitter \\
+Shoulder pos. noise  & $\sigma = 0.017$ rad  & Gear backlash ($\sim$1° at output) \\
+Shoulder vel. noise  & $\sigma = 0.050$ rad/s & Pre-gear encoder, high CPR \\
+Elbow pos. noise     & $\sigma = 0.003$ rad  & AS5600 $\sim$2 LSB \\
+Elbow vel. filter    & $\alpha \in [0.6,\ 0.8]$ & Low-pass filter tuning on ESP32 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Per-Joint Velocity Estimation}
+
+A key sim-to-real gap is velocity estimation. MuJoCo provides \texttt{qvel}
+directly as an integrated state, but on real hardware:
+
+\begin{itemize}
+    \item \textbf{Shoulder}: the motor encoder (pre-gearbox) has high effective
+          CPR, so pulse-counting gives clean velocity with small additive noise.
+    \item \textbf{Elbow}: the AS5600 is an absolute position encoder; velocity
+          must be estimated by differentiating consecutive readings:
+          \begin{equation}
+          \hat{\dot\theta}_t = \alpha \cdot \frac{\theta_t - \theta_{t-1}}{\Delta t}
+          + (1 - \alpha)\,\hat{\dot\theta}_{t-1}
+          \end{equation}
+          This low-pass filter introduces phase lag.  Tests show that a broad
+          filter range hurts robustness, while a narrow range can be tolerated.
+          The current \texttt{real\_ready} policy therefore uses raw simulated
+          \texttt{qvel[1]} during training and keeps elbow filtering as a
+          hardware/firmware item to tune carefully.
+\end{itemize}
+
+\subsection{Training Status, June 4 2026}
+
+All current training outputs are organized under \texttt{pendulum/runs/}.
+The clean no-DR policy was trained for 30 s episodes and is used as the
+warm-start source for DR fine-tuning.
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Run} & \textbf{Folder} & \textbf{Best mean} & \textbf{Notes} \\
+\midrule
+No DR baseline & \texttt{runs/no\_dr/20260604\_163108} & 2886.57 / 3000 & Strong clean policy \\
+Full DR & archived invalid & Failed & Collapsed under combined DR \\
+\texttt{mass\_motor\_delay} & \texttt{20260604\_175615\_mass\_motor\_delay} & 2637.46 / 3000 & Passed mean, high variance \\
+\texttt{real\_ready} & \texttt{20260604\_182638\_real\_ready} & 2771.58 / 3000 & High mean, poor worst-case robustness \\
+\texttt{real\_ready\_stage2} & \texttt{20260604\_204533\_real\_ready\_stage2} & 2554.50 / 3000 & Current robust DR policy \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The \texttt{real\_ready} policy records a clean GIF score of
+2896.0 / 3000 over 30 s, so nominal behavior is strong.  However, full
+\texttt{real\_ready} randomized evaluation still has low worst-case episodes
+(best-eval worst episode 188.80).  The Stage 2 policy lowers peak mean reward
+slightly but improves worst-case robustness substantially: best mean
+2554.50 / 3000, standard deviation 48.70, and worst episode 2439.84.
+
+\subsection{No-DR vs Stage 2 Robustness}
+
+To test sim-to-real robustness, the clean no-DR policy and the Stage 2 DR
+policy were both evaluated under the same \texttt{real\_ready\_stage2}
+randomized environment for 20 episodes.
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Policy} & \textbf{Mean} & \textbf{Std} & \textbf{Worst} & \textbf{Best} & \textbf{Success} \\
+\midrule
+No DR baseline & 1729.64 & 1336.33 & 84.20 & 2893.91 & 60\% \\
+Stage 2 DR & 2554.67 & 43.38 & 2483.71 & 2638.26 & 100\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent This comparison applies Stage 2 randomized conditions to both
+policies.  It shows that the no-DR policy is excellent in clean simulation but
+fragile under realistic imperfections, while the Stage 2 policy is much more
+consistent.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Policy} & \textbf{Swing-up} & \textbf{Action RMS} & \textbf{Control Energy} & \textbf{Shoulder Range} \\
+\midrule
+No DR baseline & 0.96 s & 0.347 & 5.07 & 136.1$^\circ$ \\
+Stage 2 DR & 1.02 s & 0.372 & 4.18 & 271.7$^\circ$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Isolated DR Results}
+
+\begin{center}
+\begin{tabular}{llrl}
+\toprule
+\textbf{Profile} & \textbf{Run} & \textbf{Best mean} & \textbf{Conclusion} \\
+\midrule
+Mass/inertia & \texttt{20260604\_173556\_mass} & 2892.20 & Safe \\
+Shoulder damping & \texttt{20260604\_173723\_shoulder\_damping} & 2866.00 & Safe at $\pm5\%$ \\
+Motor & \texttt{20260604\_174320\_motor} & 2892.88 & Safe \\
+Delay & \texttt{20260604\_174421\_delay} & 2909.24 & Safe after adaptation \\
+Elbow damping & \texttt{20260604\_173826\_elbow\_damping} & -2141.73 & Fails \\
+Sensor combined & \texttt{20260604\_174850\_sensor} & 2141.39 & Below target \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Elbow Troubleshooting}
+
+The elbow is currently the main sim-to-real risk.  The current XML has no
+explicit elbow damping, but the old DR range randomly sampled up to
+\texttt{0.003} Nm s/rad.  For the updated \texttt{rod\_2} model this is too
+large.
+
+\begin{center}
+\begin{tabular}{rrl}
+\toprule
+\textbf{Fixed elbow damping} & \textbf{Mean reward} & \textbf{Result} \\
+\midrule
+0.00000 & 2896.99 & Stable \\
+0.00002 & 2892.77 & Stable \\
+0.00005 & 735.80  & Fails swing-up/balance \\
+0.00010 & -269.17 & Fails \\
+0.00050 & -3145.53 & Collapses \\
+0.00300 & -3147.49 & Collapses \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The current rod mass is 0.01888 kg and the pivot-to-COM distance is
+0.03603 m, giving a gravity torque scale of about 0.00667 Nm.  With damping
+\texttt{c=0.003}, the damping torque at 10 rad/s is 0.030 Nm, roughly 4.5
+times the gravity torque scale.  This explains why the old elbow damping DR
+was not a mild perturbation.
+
+\begin{center}
+\begin{tabular}{rrrl}
+\toprule
+\textbf{Elbow sensor test} & \textbf{Best mean} & \textbf{Worst episode} & \textbf{Conclusion} \\
+\midrule
+Position noise only & 2864.88 & 2862.85 & Safe \\
+Velocity noise only & 2891.53 & 2890.10 & Safe \\
+Small elbow pos. noise & 2883.52 & 2860.66 & Safe \\
+Broad elbow velocity filter & 2477.63 & 1981.34 & Fails target \\
+Narrow elbow velocity filter & 2714.16 & 2215.98 & Passes mean, still variable \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Decision: keep small elbow position noise, tiny elbow damping, and
+small encoder zero-offset DR in the current training profile.  Elbow damping
+uses \texttt{uniform(0,\ 0.00002)} Nm s/rad.  Shoulder zero offset uses
+$\pm1^\circ$ and elbow zero offset uses $\pm0.5^\circ$.  Elbow velocity
+filtering remains excluded from \texttt{real\_ready\_stage2}; if the firmware
+needs a filtered velocity estimate, test it separately with the existing
+\texttt{sensor\_filter\_narrow} profile.
+
+\subsection{Earlier Training Challenges}
+
+\begin{enumerate}
+    \item \textbf{Cold-start failure}: Training from scratch with full DR
+          caused policy collapse by step 50k. The task (swing-up + balance
+          under simultaneous noise, delay, and torque variation) was too hard
+          for the policy to discover from random initialisation.
+
+    \item \textbf{Fix -- warm-start}: Loading the best ctrl-cost model
+          (799 reward) as the starting policy and fine-tuning with DR
+          (\texttt{ent\_coef=0.05}, \texttt{learning\_rate=1e-4}) avoided the
+          cold-start problem. The policy already knew how to swing up;
+          DR fine-tuning only needed to teach robustness.
+
+    \item \textbf{Observation mismatch}: The velocity filter was initially
+          applied unconditionally in \texttt{\_get\_obs()}, changing the
+          eval observation distribution from what the warm-start model expected.
+          Fix: gate the filter inside \texttt{if self.\_domain\_rand}.
+
+    \item \textbf{Delay too aggressive}: \texttt{\_max\_delay = 2} steps
+          (20 ms over a 10 ms control loop) caused unstable fine-tuning.
+          Reduced to \texttt{\_max\_delay = 1}.
+
+    \item \textbf{Spinning failure mode}: One DR run learned to spin the
+          pendulum continuously rather than balance, achieving a small positive
+          reward by briefly passing through upright each revolution. Root cause:
+          the ctrl cost alone was insufficient to discourage continuous rotation
+          under DR conditions where weaker torque made each spin cheaper.
+          A spin cost $-0.001\,\dot\theta^2$ was tested but interfered with
+          swing-up (which requires transiently high $\dot\theta$). Resolved by
+          tightening DR ranges so the ctrl cost was sufficient.
+
+    \item \textbf{Plateau at $\sim$$-65$ to $-75$}: With tighter DR ranges
+          and correct observation gating, the DR fine-tuned model plateaued
+          around $-65$ eval reward and never consistently exceeded the initial
+          warm-start score of $+155$ (measured before any gradient updates).
+          This indicates curriculum DR is necessary for stable improvement.
+\end{enumerate}
+
+\subsection{Historical DR Model Result}
+
+An earlier DR model (saved at step 10k, before fine-tuning degraded it) scored
+$+155$ eval reward (clean conditions) and $+178$ in a recorded episode.
+Visually: smooth arm motion, no spinning, but balance sustained for only
+$\sim$1 second before the pendulum falls. The swing-up is reliable; balance
+under perturbation remained the unsolved challenge at that stage.  This is
+superseded by the 30 s \texttt{real\_ready} run documented above.
+
+\subsection{Stopping Criteria}
+
+To avoid wasting compute on plateaued runs, two automatic stopping callbacks
+were added to \texttt{train.py}:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Callback} & \textbf{Trigger} & \textbf{Purpose} \\
+\midrule
+\texttt{StopTrainingOnRewardThreshold} & Eval reward $> 2550$ over 30 s & Stop early on success \\
+\texttt{StopTrainingOnNoModelImprovement} & No new best after mature eval window & Stop on plateau \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%─────────────────────────────────────────────────────────────────────────────
+\subsection{Curriculum Domain Randomisation}
+
+\subsubsection{Motivation}
+
+Jumping directly from a clean warm-start policy to full DR caused the policy to
+collapse within 100--200k steps and never recover (eval reward $-65$ to $-75$,
+vs.\ $+799$ clean). The fix is to \emph{ramp} DR gradually so the policy
+adapts incrementally rather than facing the full perturbation all at once.
+
+\subsubsection{Implementation}
+
+A shared \texttt{schedule} dict (a Python object held in memory and passed to
+all training environments via closure) stores a single scalar \texttt{progress}
+$\in [0, 1]$. \texttt{CurriculumCallback} updates it every step:
+
+\begin{lstlisting}[style=python]
+class CurriculumCallback(BaseCallback):
+    def _on_step(self) -> bool:
+        self._schedule["progress"] = min(
+            1.0, self.num_timesteps / self._curriculum_steps
+        )
+        return True
+\end{lstlisting}
+
+\noindent In \texttt{FurutaPendulumEnv.reset()}, all DR ranges scale linearly
+with \texttt{progress} $p$:
+
+\begin{lstlisting}[style=python]
+if p > 0:
+    mass_scale = uniform(1 - 0.05*p, 1 + 0.05*p)
+    self.model.body_mass[...] *= mass_scale
+    self.model.body_inertia[...] *= mass_scale
+    self.model.dof_damping[0] = nom_shoulder_damp * uniform(1 - 0.05*p, 1 + 0.05*p)
+    self.model.actuator_gear[0, 0] = nom_motor_gear * uniform(1 - 0.05*p, 1 + 0.05*p)
+    delay = int(integers(0, round(p) + 1))   # 0 steps until p>0.5
+    # real_ready_stage2 also adds shoulder/elbow encoder zero offsets
+\end{lstlisting}
+
+\noindent Observation noise in \texttt{\_get\_obs()} is also scaled by $p$.
+For \texttt{real\_ready}, the sensor DR is shoulder position noise, shoulder
+velocity noise, and small elbow position noise only.
+
+\subsubsection{Safe Run Storage}
+
+A dedicated \texttt{train\_clean.py} script trains the clean (no-DR) baseline
+and saves all outputs to a timestamped directory under
+\texttt{runs/no\_dr/}.  DR fine-tuning writes to a separate timestamped
+directory under \texttt{runs/dr/}.  This keeps clean baselines, DR runs, logs,
+normalization files, XML snapshots, and GIFs organized by experiment.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{File} & \textbf{Written by} \\
+\midrule
+\texttt{runs/no\_dr/<timestamp>/best\_model.zip} & \texttt{train\_clean.py} \\
+\texttt{runs/no\_dr/<timestamp>/vec\_normalize\_best.pkl} & \texttt{train\_clean.py} \\
+\texttt{runs/dr/<timestamp>\_<profile>/best\_model.zip} & \texttt{train.py} \\
+\texttt{runs/dr/<timestamp>\_<profile>/run\_config.json} & \texttt{train.py} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \texttt{train.py} automatically loads the latest no-DR run as the
+warm-start source and writes the selected DR profile into
+\texttt{run\_config.json}.
+
+\subsubsection{Clean Training Result}
+
+The current clean baseline (no DR, fresh PPO from scratch, 30 s episodes)
+reached \textbf{2886.57 / 3000} and is saved in
+\texttt{runs/no\_dr/20260604\_163108/}.  The recorded nominal GIF achieved
+approximately \textbf{2896 / 3000}.
+
+\subsubsection{Historical Curriculum DR Training Results}
+
+Earlier curriculum DR runs were performed before the current CAD/profile
+cleanup.  They are retained as historical context only:
+
+\begin{center}
+\begin{tabular}{lllrr}
+\toprule
+\textbf{Run} & \textbf{ent\_coef} & \textbf{Curriculum} & \textbf{Best eval} & \textbf{Stopped at} \\
+\midrule
+DR run 1 & 0.05  & 2M steps & \textbf{808} (step 160k) & 1.0M (patience) \\
+DR run 2 & 0.05  & 3M steps & 638 (step 10k)  & 2.5M (patience) \\
+DR run 3 & 0.005 & 3M steps & 737 (step 220k) & 2.5M (patience) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent These runs used the older storage layout and older DR ranges.  They
+are superseded by the current \texttt{runs/} experiments and the
+\texttt{real\_ready} profile.
+
+\subsubsection{Root Cause Analysis}
+
+The warm-start policy peaks early because the DR training gradient updates
+cause it to \emph{forget} precise balance timing before it learns DR robustness.
+Two contributing factors:
+
+\begin{enumerate}
+    \item \textbf{High entropy coefficient} (\texttt{ent\_coef=0.05} vs.\
+          \texttt{0.01} in clean training): the optimiser is penalised for
+          being confident, pushing the policy to explore and abandon the
+          learned balance behaviour. Reducing to \texttt{0.005} (run 3)
+          improved early stability but did not solve the underlying issue.
+    \item \textbf{Patience too short}: with \texttt{min\_evals=50}
+          (original), the no-improvement check fired at 1M steps before the
+          curriculum finished ramping. Extended to \texttt{min\_evals=150}
+          and \texttt{max\_no\_improvement\_evals=100} in later runs (total
+          steps increased to 4M), but the policy still never recovered its
+          clean peak.
+\end{enumerate}
+
+\subsubsection{Next Direction}
+
+The current best deployment candidate is the \texttt{real\_ready\_stage2} run
+\texttt{runs/dr/20260604\_204533\_real\_ready\_stage2/}.  It crossed the
+2550 / 3000 threshold and has strong worst-case randomized performance.  Before
+hardware deployment, the highest-value measurements are elbow pivot friction
+(free-swing decay), AS5600 velocity-estimator lag, motor response, and
+end-to-end control delay.
+
+\subsubsection{Encoder Zero Calibration}
+
+The current elbow joint uses \texttt{ref="0"} and was verified in the MuJoCo
+viewer: at \texttt{qpos[1]=0} the pendulum rod is visually upright.  The
+policy's zero angle therefore means upright in simulation.
+
+On the real robot, the AS5600 encoder must be calibrated so that it reads zero
+when the rod is held upright. Without this, the policy sees a constant angular
+offset and tries to balance at the wrong angle. The calibration procedure is:
+hold the rod upright at power-on, record the raw encoder value, and subtract it
+from all subsequent readings in firmware.
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Hardware Platform}
+
+\subsection{Microcontroller}
+
+The real-time controller is an \textbf{ESP32 (ESP-WROOM-32 / ESP32-S)},
+running at 240 MHz (dual-core Xtensa LX6). It reads the AS5600 encoder and
+drives the motor, targeting a 10 ms control loop to match the simulation
+control period.
+
+\subsection{Wireless Communication}
+
+Real-time policy deployment uses \textbf{ESP-NOW}, Espressif's peer-to-peer
+MAC-layer protocol. Compared to alternatives:
+
+\begin{center}
+\begin{tabular}{lrll}
+\toprule
+\textbf{Protocol} & \textbf{Latency} & \textbf{Jitter} & \textbf{Verdict} \\
+\midrule
+ESP-NOW   & 1--2 ms   & Very low & \textbf{Selected} \\
+WiFi UDP  & 2--10 ms  & Medium   & Acceptable \\
+WiFi TCP  & 5--20 ms  & High     & Too slow \\
+BLE       & 10--50 ms & High     & Too slow \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The 1--2 ms ESP-NOW round-trip is well within the 10 ms control
+period, making explicit latency randomisation during training unnecessary for
+a first deployment attempt.
+
+\subsection{System Architecture}
+
+The trained policy runs on the PC where the full PyTorch model is available.
+Commands are relayed to the pendulum over ESP-NOW via a bridge ESP32 connected
+by USB:
+
+\medskip
+\begin{center}
+\ttfamily
+PC (PPO policy, Python)\\
+$\updownarrow$ USB serial ($<$1 ms)\\
+ESP32 bridge (serial $\leftrightarrow$ ESP-NOW relay)\\
+$\updownarrow$ ESP-NOW ($\sim$1--2 ms)\\
+ESP32 on pendulum (encoder read + motor drive)
+\end{center}
+\medskip
+
+%─────────────────────────────────────────────────────────────────────────────
+\section{Next Steps}
+
+\subsection{Completed}
+\begin{itemize}
+    \item[$\checkmark$] Control regularisation ($-0.1u^2$), eval reward 799/1000
+    \item[$\checkmark$] Domain randomisation infrastructure (per-joint noise, action delay, torque scale)
+    \item[$\checkmark$] Warm-start fine-tuning strategy
+    \item[$\checkmark$] Automatic stopping criteria (plateau + threshold)
+    \item[$\checkmark$] CUDA 12.8 PyTorch install (RTX 5070 Blackwell)
+    \item[$\checkmark$] Curriculum DR implementation (\texttt{CurriculumCallback}, scaled DR ranges)
+    \item[$\checkmark$] Safe training pipeline with timestamped \texttt{runs/no\_dr/} and \texttt{runs/dr/} folders
+    \item[$\checkmark$] Clean 30 s baseline retrained: 2886.57 / 3000 in \texttt{runs/no\_dr/20260604\_163108/}
+    \item[$\checkmark$] Current DR candidate: \texttt{real\_ready\_stage2}, 2554.50 / 3000 mean and 2439.84 worst episode in \texttt{runs/dr/20260604\_204533\_real\_ready\_stage2/}
+    \item[$\checkmark$] No-DR vs Stage 2 robustness report generated in \texttt{reports/stage2\_dr\_report\_20260604.md}
+    \item[$\checkmark$] Elbow troubleshooting completed: damping and velocity filtering identified as weak points
+    \item[$\checkmark$] Encoder zero convention verified in MuJoCo viewer (\texttt{ref="0"} correct)
+\end{itemize}
+
+\subsection{Immediate}
+\begin{enumerate}
+    \item \textbf{System identification} -- measure elbow pivot friction from
+          free-swing decay, AS5600 velocity-estimator lag, motor response, and
+          end-to-end latency.  Use these measurements to tighten DR ranges.
+    \item \textbf{Disturbance testing} -- evaluate Stage 2 recovery from
+          standardized elbow angle/velocity kicks after the pendulum is upright.
+    \item \textbf{Robot deployment} -- test the current deployment candidate
+          (\texttt{runs/dr/20260604\_204533\_real\_ready\_stage2/best\_model.zip} +
+          \texttt{vec\_normalize\_best.pkl}) after AS5600 zero calibration.
+\end{enumerate}
+
+\subsection{Hardware Deployment}
+\begin{enumerate}
+    \setcounter{enumi}{3}
+    \item \textbf{ESP32 firmware} -- implement AS5600 encoder read (I$^2$C),
+          motor encoder read, motor PWM drive, and ESP-NOW packet handler.
+          Implement low-pass velocity filter matching the simulated $\alpha$.
+    \item \textbf{Bridge firmware} -- USB serial $\leftrightarrow$ ESP-NOW
+          relay on the PC-side ESP32.
+    \item \textbf{Real-hardware interface} -- replace \texttt{mj\_step} with
+          real sensor reads and motor commands; deploy policy over ESP-NOW.
+    \item \textbf{Sim-to-real debugging} -- systematic troubleshooting:
+          verify observation signs, check velocity filter tuning, compare
+          motor response to simulation.
+\end{enumerate}
+
+\begin{thebibliography}{9}
+\bibitem{schulman2017proximal}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov,
+``Proximal Policy Optimization Algorithms,''
+\textit{arXiv preprint arXiv:1707.06347}, 2017.
+\end{thebibliography}
+
+\end{document}

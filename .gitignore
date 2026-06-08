@@ -7,3 +7,4 @@ pendulum/models/evaluations.npz
 pendulum/models/vec_normalize.pkl
 pendulum/motor_tests.png
 pendulum/sanity_check.png
+pendulum/runs/

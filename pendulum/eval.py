@@ -1,8 +1,9 @@
 """
 Load the best trained PPO policy and run one episode with the interactive viewer.
 Usage:
-    python eval.py                      # loads models/best_model.zip
-    python eval.py models/ppo_furuta_final  # load a specific checkpoint (no .zip)
+    python eval.py                                    # loads latest no_dr run
+    python eval.py runs/no_dr/<timestamp>/best_model  # specific run
+    python eval.py models/scratch_dr/best_model       # DR model
 """
 import sys
 import numpy as np
@@ -14,9 +15,21 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv
 from furuta_env import FurutaPendulumEnv
 
-MODELS_DIR = Path(__file__).with_name("models")
-model_path = sys.argv[1] if len(sys.argv) > 1 else str(MODELS_DIR / "best_model")
-norm_path  = str(MODELS_DIR / "vec_normalize_best.pkl")
+
+def _latest_run_model() -> str:
+    runs_dir = Path(__file__).with_name("runs") / "no_dr"
+    runs = sorted(runs_dir.iterdir()) if runs_dir.exists() else []
+    if not runs:
+        raise FileNotFoundError(f"No runs found in {runs_dir}. Pass model path explicitly.")
+    return str(runs[-1] / "best_model")
+
+
+if len(sys.argv) > 1:
+    model_path = sys.argv[1]
+else:
+    model_path = _latest_run_model()
+
+norm_path = str(Path(model_path).parent / "vec_normalize_best.pkl")
 
 print(f"Loading model : {model_path}")
 print(f"Loading stats : {norm_path}")
