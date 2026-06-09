@@ -30,16 +30,16 @@
 
 <!-- motor fixed to world at 15cm height -->
         <body name="fixed_motor" pos="0 0 0.15">
-            <geom mesh="fixed_motor" mass="0.04560"/>
+            <geom mesh="fixed_motor" mass="0.09200"/>
             <body name="arm">
                 <!-- Joint ranges are degrees by default in MJCF. -->
                 <joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
                        limited="true" range="-135 135" solreflimit="0.005 1"/>
-                <geom mesh="arm" mass="0.02529"/>
+                <geom mesh="arm" mass="0.04300"/>
                 <body name="pendulum_rod">
                     <!-- qpos[1]=0 is upright; qpos[1]=+/-pi is hanging. -->
                     <joint name="elbow" pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"/>
-                    <geom mesh="pendulum_rod" mass="0.01888"/>
+                    <geom mesh="pendulum_rod" mass="0.01500"/>
                 </body>
             </body>
         </body>
