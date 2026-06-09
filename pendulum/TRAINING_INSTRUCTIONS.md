@@ -39,10 +39,10 @@ python train.py
 
 By default, `train.py` warm-starts from the latest `runs/no_dr/` run.
 
-To warm-start from a specific run:
+To warm-start from the Git-tracked clean baseline:
 
 ```powershell
-$env:FURUTA_WARM_START_DIR = "runs/no_dr/20260604_163108"
+$env:FURUTA_WARM_START_DIR = "trained_policies/clean_baseline_20260604"
 $env:FURUTA_RUN_ID = "my_stage2_run"
 $env:FURUTA_DR_PROFILE = "real_ready_stage2"
 python train.py
@@ -119,7 +119,27 @@ Example:
 python record.py runs/dr/20260605_elbow_kick_0p5deg_x3_fall20_longrun/best_model.zip runs/dr/20260605_elbow_kick_0p5deg_x3_fall20_longrun/elbow_kick_best.gif
 ```
 
-## 6. Notes
+## 6. Git-Tracked Policies
+
+Curated checkpoints are saved in:
+
+```text
+trained_policies/
+```
+
+Current useful checkpoints:
+
+```text
+trained_policies/clean_baseline_20260604
+trained_policies/domain_randomized_20260604
+trained_policies/disturbance_long_hold_20260605
+```
+
+Each folder contains `best_model.zip`, `vec_normalize_best.pkl`,
+`run_config.json`, the XML snapshot, and evaluation history. These are the
+files to push to GitHub. Do not push the full `runs/` folder.
+
+## 7. Notes
 
 - `runs/` is ignored by Git because it contains large generated checkpoints,
   logs, and GIFs.

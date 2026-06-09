@@ -1,0 +1,20 @@
+{
+  "run_id": "20260604_163108",
+  "domain_randomization": false,
+  "n_envs": 4,
+  "total_steps": 3000000,
+  "episode_seconds": 30.0,
+  "eval_freq": 10000,
+  "checkpoint_freq": 200000,
+  "reward_threshold": 2550,
+  "ppo": {
+    "n_steps": 2048,
+    "batch_size": 64,
+    "n_epochs": 10,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "ent_coef": 0.01,
+    "learning_rate": 0.0003,
+    "clip_range": 0.2
+  }
+}

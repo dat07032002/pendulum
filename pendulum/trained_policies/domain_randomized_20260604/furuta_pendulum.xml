@@ -1,0 +1,52 @@
+<mujoco model="furuta_pendulum">
+    <default>
+        <!-- remap SolidWorks X-up to MuJoCo Z-up -->
+        <geom type="mesh" xyaxes="0 0 1 1 0 0"/>
+    </default>
+
+    <contact>
+        <exclude body1="fixed_motor" body2="arm"/>
+        <exclude body1="arm" body2="pendulum_rod"/>
+        <exclude body1="fixed_motor" body2="pendulum_rod"/>
+    </contact>
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
+        <rgba haze="0.15 0.25 0.35 1"/>
+    </visual>
+
+    <asset>
+        <!-- SolidWorks exports in mm, scale to meters -->
+        <!-- refpos re-centers all meshes around the motor's center in SolidWorks global frame (mm) -->
+        <mesh name="fixed_motor"  file="cad/fixed_motor.stl"  scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="arm"          file="cad/arm_2.STL"        scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+        <mesh name="pendulum_rod" file="cad/rod_2.STL"        scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
+    </asset>
+
+    <worldbody>
+        <!-- lights -->
+        <light pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
+        <light pos="0.5 0.5 1" dir="-1 -1 -1" diffuse="0.4 0.4 0.4"/>
+
+<!-- motor fixed to world at 15cm height -->
+        <body name="fixed_motor" pos="0 0 0.15">
+            <geom mesh="fixed_motor" mass="0.04560"/>
+            <body name="arm">
+                <!-- Joint ranges are degrees by default in MJCF. -->
+                <joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
+                       limited="true" range="-135 135" solreflimit="0.005 1"/>
+                <geom mesh="arm" mass="0.02529"/>
+                <body name="pendulum_rod">
+                    <!-- qpos[1]=0 is upright; qpos[1]=+/-pi is hanging. -->
+                    <joint name="elbow" pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"/>
+                    <geom mesh="pendulum_rod" mass="0.01888"/>
+                </body>
+            </body>
+        </body>
+    </worldbody>
+
+    <actuator>
+        <!-- Normalized control maps linearly to the motor's +/-0.132 N m torque. -->
+        <motor name="shoulder_motor" joint="shoulder" gear="0.132" ctrlrange="-1 1"/>
+    </actuator>
+</mujoco>
