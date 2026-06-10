@@ -83,6 +83,8 @@ class FurutaPendulumEnv(gym.Env):
         self._prev_elbow_angle     = 0.0
         self._elbow_dot_filtered   = 0.0
         self._filter_alpha         = 0.7
+        self._motor_deadband_max   = 0.05   # up to 5% of full command
+        self._motor_deadband       = 0.0
         self._action_buf           = collections.deque([0.0], maxlen=1)
         self._balance_mode         = False
         self._balance_steps        = 0
@@ -123,7 +125,7 @@ class FurutaPendulumEnv(gym.Env):
         if self._dr_profile == "sensor_filter_narrow":
             return name == "elbow_filter_narrow"
         if self._dr_profile in {"real_ready", "real_ready_stage2"}:
-            return name in {"shoulder_pos", "shoulder_vel", "elbow_pos_small"}
+            return name in {"shoulder_pos", "shoulder_vel", "elbow_pos_small", "elbow_filter"}
         return False
 
     def _zero_offset_enabled(self) -> bool:
@@ -215,6 +217,11 @@ class FurutaPendulumEnv(gym.Env):
                     1 - self._motor_gear_dr_range*p,
                     1 + self._motor_gear_dr_range*p,
                 )
+                # motor deadband: small commands produce no torque (static friction + back-EMF)
+                if self._dr_profile in {"real_ready", "real_ready_stage2"}:
+                    self._motor_deadband = self.np_random.uniform(0.0, self._motor_deadband_max * p)
+                else:
+                    self._motor_deadband = 0.0
             if self._dr_enabled("delay"):
                 delay = int(self.np_random.integers(0, round(p) + 1))
                 self._action_buf = collections.deque([0.0] * (delay + 1), maxlen=delay + 1)
@@ -224,6 +231,9 @@ class FurutaPendulumEnv(gym.Env):
                 self._filter_alpha = 0.7 + self.np_random.uniform(-0.1*p, 0.1*p)
             elif self._dr_profile == "sensor_filter_narrow":
                 self._filter_alpha = self.np_random.uniform(0.7, 0.8)
+            elif self._dr_profile in {"real_ready", "real_ready_stage2"}:
+                # AS5600 differentiates position; keep lag range narrow for first hardware DR.
+                self._filter_alpha = self.np_random.uniform(0.7, 0.9)
             if self._zero_offset_enabled():
                 self._shoulder_zero_offset = self.np_random.uniform(
                     -self._shoulder_zero_offset_range * p,
@@ -234,8 +244,9 @@ class FurutaPendulumEnv(gym.Env):
                     self._elbow_zero_offset_range * p,
                 )
         else:
-            self._action_buf   = collections.deque([0.0], maxlen=1)
-            self._filter_alpha = 0.7
+            self._action_buf     = collections.deque([0.0], maxlen=1)
+            self._filter_alpha   = 0.7
+            self._motor_deadband = 0.0
 
         mujoco.mj_setConst(self.model, self.data)
 
@@ -259,7 +270,9 @@ class FurutaPendulumEnv(gym.Env):
     # ------------------------------------------------------------------
     def step(self, action):
         self._action_buf.append(float(np.clip(action[0], -1.0, 1.0)))
-        self.data.ctrl[0] = self._action_buf[0]
+        u_delayed = self._action_buf[0]
+        # motor deadband: commands below threshold produce no torque
+        self.data.ctrl[0] = 0.0 if abs(u_delayed) < self._motor_deadband else u_delayed
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
 

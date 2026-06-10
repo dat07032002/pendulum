@@ -10,7 +10,7 @@
 \setlength{\parskip}{0.35em}
 \setlength{\parindent}{0pt}
 \setlength{\tabcolsep}{4pt}
-\renewcommand{\arraystretch}{0.92}
+\renewcommand{\arraystretch}{0.95}
 
 \definecolor{codebg}{rgb}{0.95,0.95,0.95}
 \lstset{
@@ -22,9 +22,9 @@
 }
 
 \title{\vspace{-1.2cm}\textbf{Furuta Pendulum Sim-to-Real Report}\\
-\large Current MuJoCo Model, Stage 2 Domain Randomization, Long-Hold Training, and Results}
+\large Current MuJoCo Model, Hardware-Mass Training, and Domain Randomization}
 \author{}
-\date{June 5, 2026}
+\date{June 9, 2026}
 
 \begin{document}
 \maketitle
@@ -32,40 +32,42 @@
 
 \section{Summary}
 
-The current Furuta pendulum model uses the updated \texttt{arm\_2.STL} and
-\texttt{rod\_2.STL} CAD files.  The no-domain-randomization (no-DR) policy
-balances well in clean simulation, but it is fragile when tested under
-realistic perturbations.  The current deployment candidate is
-\texttt{real\_ready\_stage2}, a Stage 2 domain-randomized (DR) policy.
+This project trains a PPO controller for a Furuta pendulum in MuJoCo before
+transfer to real hardware.  The model uses SolidWorks CAD meshes converted to
+MuJoCo, with the arm angle limited to $\pm135^\circ$ so the mechanism does not
+spin continuously, wrap cables, or block the future CyberRunner camera view.
+
+The most recent update replaces the older CAD-estimated masses with measured
+hardware masses.  A new clean policy and a new domain-randomized (DR) policy
+were trained from these masses.  The current deployment candidate is:
 
 \begin{center}
-\begin{tabular}{lrrrrr}
+\texttt{trained\_policies/dr\_hardware\_masses\_20260609/best\_model.zip}
+\end{center}
+
+\begin{center}
+\begin{tabular}{llll}
 \toprule
-\textbf{Policy tested under Stage 2 DR} & \textbf{Mean} & \textbf{Std} & \textbf{Worst} & \textbf{Best} & \textbf{Success} \\
+\textbf{Policy} & \textbf{Run} & \textbf{Best mean} & \textbf{Max reward} \\
 \midrule
-No DR baseline & 1729.64 & 1336.33 & 84.20 & 2893.91 & 60\% \\
-Stage 2 DR & 2554.67 & 43.38 & 2483.71 & 2638.26 & 100\% \\
+Clean hardware-mass policy & \texttt{20260609\_133511} & 4095.68 & 4200 \\
+Clean hardware-mass policy & \texttt{20260609\_133618} & 4094.71 & 4200 \\
+DR hardware-mass policy & \texttt{20260609\_135537} & 4051.84 & 4200 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\textbf{Key result:} when both policies are tested under the same Stage 2
-randomized conditions, Stage 2 improves worst-case reward from 84.20 to
-2483.71.  This is the main sim-to-real robustness result.
+The latest completed experiment adds motor deadband and elbow velocity
+filtering.  It warm-started from the hardware-mass DR policy and better matches
+real motor and AS5600 encoder behavior.
 
-After Stage 2, the reward was tightened for longer upright balance.  The best
-current simulation candidate is the saved elbow-disturbance checkpoint
-\texttt{20260605\_elbow\_kick\_0p5deg\_x3\_fall20\_longrun/best\_model.zip},
-which survived a 60 s recorded episode with three small elbow angle kicks and
-scored 8240.4 / 8400.
+\section{System Model}
 
-\section{Current MuJoCo Model}
-
-\subsection{Hardware and CAD}
-
-The system has a fixed motor body, an actuated rotary arm, and a passive
-pendulum rod.  The shoulder angle is $\phi$ and the elbow/pendulum angle is
-$\theta$.
+The Furuta pendulum has a motorized rotary arm and a passive pendulum attached
+at the arm tip.  The motor does not directly actuate the pendulum; instead, it
+moves the arm to accelerate the pendulum pivot.  During swing-up, the controller
+injects energy into the pendulum.  During balance, it makes corrective arm
+motions to keep the pendulum upright.
 
 \begin{center}
 \begin{tabular}{ll}
@@ -83,15 +85,21 @@ Control period & 10 ms \\
 \end{tabular}
 \end{center}
 
-\subsection{Joints, Masses, and Actuator}
+The angle convention is:
+\[
+\theta=0 \text{ upright}, \qquad \theta=\pm\pi \text{ hanging down},
+\]
+where $\theta$ is the pendulum angle.  The shoulder/arm angle is $\phi$.
+
+\section{MuJoCo Parameters}
 
 \begin{center}
 \begin{tabular}{lll}
 \toprule
 \textbf{Joint} & \textbf{Definition} & \textbf{Notes} \\
 \midrule
-Shoulder & \texttt{pos="0 0 0.02575" axis="0 0 1"} & $\pm135^\circ$, damping 0.01 \\
-Elbow & \texttt{pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"} & $0$ rad upright, $\pm\pi$ hanging \\
+Shoulder & \texttt{pos="0 0 0.02575" axis="0 0 1"} & actuated, $\pm135^\circ$, damping 0.01 \\
+Elbow & \texttt{pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"} & passive, $0$ rad upright \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -99,246 +107,133 @@ Elbow & \texttt{pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"} & $0$ rad uprig
 \begin{center}
 \begin{tabular}{lrr}
 \toprule
-\textbf{Body} & \textbf{Mass (g)} & \textbf{XML value (kg)} \\
+\textbf{Body} & \textbf{Measured mass (g)} & \textbf{XML value (kg)} \\
 \midrule
-fixed\_motor & 45.60 & 0.04560 \\
-arm & 25.29 & 0.02529 \\
-pendulum\_rod & 18.88 & 0.01888 \\
+fixed\_motor & 92.00 & 0.09200 \\
+arm & 43.00 & 0.04300 \\
+pendulum\_rod & 15.00 & 0.01500 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The motor actuator uses \texttt{gear="0.132"} and \texttt{ctrlrange="-1 1"},
-so policy action $u\in[-1,1]$ maps to torque $[-0.132,0.132]$ Nm.
-
-\subsection{Rod Geometry}
-
-\begin{center}
-\begin{tabular}{ll}
-\toprule
-\textbf{Quantity} & \textbf{Value} \\
-\midrule
-Rod COM & $[0,\ -0.035077,\ 0.089760]$ m \\
-Elbow pivot & $[0,\ -0.049505,\ 0.056747]$ m \\
-Pivot-to-COM distance & 0.03603 m \\
-Gravity torque scale & $\approx 0.00667$ Nm \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\section{RL Environment and Training}
-
-The policy observation is
+The actuator is modeled as a normalized shoulder torque command:
 \[
-\mathbf{o}=[\cos\theta,\ \sin\theta,\ \dot\theta,\ \phi,\ \dot\phi].
+u\in[-1,1] \quad \rightarrow \quad \tau\in[-0.132,0.132]\ \mathrm{Nm}.
 \]
-The action is normalized shoulder motor torque.  The original dense reward is
+
+\section{PPO Controller}
+
+The policy observation is:
 \[
-r=\cos(\theta)-0.1u^2-0.5\max(0,\ |\phi|-2.094)^2.
+\mathbf{o}=[\cos\theta,\ \sin\theta,\ \dot{\theta},\ \phi,\ \dot{\phi}].
 \]
-Episodes last 30 s (3000 control steps).  The reset state is near the hanging
-position, $\theta\approx-\pi$, with small random noise.  PPO from
-Stable-Baselines3 is trained with \texttt{VecNormalize}; DR policies warm-start
-from the clean no-DR baseline.
+Using $\cos\theta$ and $\sin\theta$ avoids the discontinuity at $\pm\pi$.
+The action is the normalized motor command $u$.
 
-For long-hold training, the reward was extended with upright bonuses and a
-small velocity penalty near upright:
+PPO was selected because it is stable, simple to implement with
+Stable-Baselines3, and works well for continuous-control MuJoCo tasks.  PPO is
+an on-policy actor-critic method: it collects rollout data using the current
+policy, estimates advantages, then updates the policy using a clipped objective
+so each update does not move too far from the behavior that generated the data.
+
+The reward used for the current hardware-mass training is:
 \[
-r=\cos(\theta)-0.1u^2-\text{limit penalty}
-  +0.2\mathbf{1}_{|\theta|<10^\circ}
-  +0.2\mathbf{1}_{|\theta|<5^\circ}
-  -0.005\dot{\theta}^2\mathbf{1}_{|\theta|<10^\circ}.
+r=\cos(\theta)-0.1u^2
+-0.5\max(0,\ |\phi|-2.094)^2
++0.2\mathbf{1}_{|\theta|<10^\circ}
++0.2\mathbf{1}_{|\theta|<5^\circ}
+-0.005\dot{\theta}^2\mathbf{1}_{|\theta|<10^\circ}.
 \]
-Once the pendulum first reaches $|\theta|<10^\circ$, the episode is considered
-captured.  Later runs terminate only if $|\theta|>20^\circ$ after capture,
-allowing recovery from small disturbances while still rejecting full falls.
 
-\begin{center}
-\begin{tabular}{ll}
-\toprule
-\textbf{Path} & \textbf{Purpose} \\
-\midrule
-\texttt{runs/no\_dr/<timestamp>/} & Clean baseline runs \\
-\texttt{runs/dr/<timestamp>\_<profile>/} & DR fine-tuning runs \\
-\texttt{best\_model.zip} & Best policy checkpoint \\
-\texttt{vec\_normalize\_best.pkl} & Matching normalization statistics \\
-\bottomrule
-\end{tabular}
-\end{center}
+The terms reward upright balance, discourage excessive torque, discourage the
+arm from approaching its mechanical limit, reward tighter upright capture, and
+penalize high pendulum velocity once near upright.  A 30 s episode has 3000
+control steps, so the maximum score is approximately:
+\[
+3000\times1.4=4200.
+\]
 
-\section{Stage 2 Domain Randomization}
+\section{Domain Randomization}
 
-The current default DR profile is \texttt{real\_ready\_stage2}.  It keeps the
-good parts of earlier DR tests and excludes elbow velocity filtering.
+Domain randomization is used so the policy does not depend on a perfect
+simulation.  The policy is first trained in clean simulation, then fine-tuned
+gradually with randomized parameters.  This curriculum is important because
+training directly under all imperfections can make PPO forget the clean swing-up
+and balance behavior before it learns robustness.
 
 \begin{center}
 \begin{tabular}{lll}
 \toprule
-\textbf{Parameter} & \textbf{Range} & \textbf{Reason} \\
+\textbf{Parameter} & \textbf{Current range} & \textbf{Purpose} \\
 \midrule
-Mass/inertia & $\pm5\%$ & CAD/measurement uncertainty \\
+Mass/inertia & $\pm5\%$ & measurement uncertainty \\
 Shoulder damping & $\pm5\%$ & gearbox/friction variation \\
 Elbow damping & $[0,\ 0.00002]$ Nm s/rad & tiny pivot friction \\
 Motor gear/torque & $\pm5\%$ & voltage/motor variation \\
 Action delay & 0--1 step & timing margin \\
-Shoulder pos. noise & $\sigma=0.017$ rad & backlash / encoder error \\
-Shoulder vel. noise & $\sigma=0.050$ rad/s & velocity estimate uncertainty \\
-Elbow pos. noise & $\sigma=0.001$ rad & AS5600 angle noise \\
+Shoulder position noise & $\sigma=0.017$ rad & backlash / encoder error \\
+Shoulder velocity noise & $\sigma=0.050$ rad/s & velocity estimate uncertainty \\
+Elbow position noise & $\sigma=0.001$ rad & AS5600 angle noise \\
 Shoulder zero offset & $\pm1^\circ$ & calibration tolerance \\
 Elbow zero offset & $\pm0.5^\circ$ & upright zero tolerance \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-Elbow velocity filtering is excluded because it adds phase lag to
-$\dot\theta$.  A narrow filter range can be tolerated, but broad filtering
-reduced worst-case performance.
+\subsection{Deadband and Filter Experiment}
 
-\section{Elbow Friction and Sensor Lessons}
+The latest training run adds two additional hardware effects:
+\begin{itemize}
+    \item \textbf{Motor deadband:} commands below a sampled threshold produce no
+          torque.  The current gentle range is 0--5\% of full command.
+    \item \textbf{Elbow velocity filtering:} the AS5600 measures angle, so
+          velocity must be estimated by differentiation and low-pass filtering.
+          The current filter range is $\alpha\in[0.7,0.9]$.
+\end{itemize}
 
-The updated rod is light, so elbow damping must be very small.  The old range
-$[0,\ 0.003]$ Nm s/rad was too large: at 10 rad/s it produces 0.030 Nm of
-damping torque, about 4.5 times the rod gravity torque scale.
+The run is:
+\[
+\texttt{runs/dr/20260609\_deadband5\_filter70\_90}.
+\]
+It warm-started from \texttt{runs/dr/20260609\_hardware\_masses}.  Early
+evaluation dropped to roughly 1100--1900 / 4200 because the new motor deadband
+and velocity lag made balance harder.  After additional PPO updates, the best
+checkpoint reached 4032.66 / 4200 with standard deviation 31.09 and full
+3000-step episodes.  A recorded deterministic GIF from this checkpoint scored
+4049.2 / 4200.
 
-\begin{center}
-\begin{tabular}{rrl}
-\toprule
-\textbf{Fixed elbow damping} & \textbf{Mean reward} & \textbf{Result} \\
-\midrule
-0.00000 & 2896.99 & Stable \\
-0.00002 & 2892.77 & Stable \\
-0.00005 & 735.80 & Fails swing-up/balance \\
-0.00010 & -269.17 & Fails \\
-0.00300 & -3147.49 & Collapses \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\begin{center}
-\begin{tabular}{lrrl}
-\toprule
-\textbf{Sensor test} & \textbf{Best mean} & \textbf{Worst} & \textbf{Conclusion} \\
-\midrule
-Small elbow position noise & 2883.52 & 2860.66 & Safe \\
-Broad elbow velocity filter & 2477.63 & 1981.34 & Fails target \\
-Narrow elbow velocity filter & 2714.16 & 2215.98 & Passes mean, variable \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\section{Long-Hold and Disturbance Training}
-
-The Stage 2 policy was further fine-tuned to reduce fall-and-recover behavior.
-The main changes were 60 s episodes, upright bonuses inside 10$^\circ$ and
-5$^\circ$, a small $\dot{\theta}$ penalty near upright, and post-capture
-termination if the pendulum leaves a 20$^\circ$ safety envelope.
+\section{Current Results}
 
 \begin{center}
 \begin{tabular}{llll}
 \toprule
-\textbf{Run} & \textbf{Disturbance} & \textbf{Best eval} & \textbf{Comment} \\
+\textbf{Stage} & \textbf{Run} & \textbf{Result} & \textbf{Comment} \\
 \midrule
-\texttt{hard\_hold\_10deg\_ent001} & none & 7443.74 / 8400 & 60 s hard-hold policy \\
-\texttt{elbow\_kick\_2deg\_fall20} & 1 kick, $\pm2^\circ$ & unstable & Too harsh for PPO \\
-\texttt{elbow\_kick\_1deg\_fall20} & 1 kick, $\pm1^\circ$ & unstable & Degraded during eval \\
-\texttt{elbow\_kick\_0p5deg\_x3} & 3 kicks, $\pm0.5^\circ$ & 8233.1 / 8400 & Best disturbance checkpoint \\
+Clean, old masses & \texttt{20260604\_163108} & 2886.57 / 3000 & historical baseline \\
+DR, old masses & \texttt{20260604\_204533} & 2554.50 / 3000 & historical robustness policy \\
+Long hold + kicks, old masses & \texttt{20260605\_elbow\_kick\_0p5deg\_x3} & 8233.1 / 8400 & historical disturbance policy \\
+Clean, hardware masses & \texttt{20260609\_133511} & 4095.68 / 4200 & new clean baseline \\
+Clean, hardware masses & \texttt{20260609\_133618} & 4094.71 / 4200 & repeat clean baseline \\
+DR, hardware masses & \texttt{20260609\_135537} & 4051.84 / 4200 & current deployment candidate \\
+DR + deadband/filter & \texttt{20260609\_deadband5\_filter70\_90} & 4032.66 / 4200 & best hardware-effect policy \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The best disturbance run peaked at 1.93M steps with reward 8233.1 $\pm$ 38.1
-and full 6000-step episodes.  Continuing training past the peak degraded the
-latest policy, so the saved \texttt{best\_model.zip} is used rather than the
-final checkpoint.  A 60 s GIF from this saved best model scored 8240.4 / 8400.
+\section{Next Steps}
 
-\section{Results}
-
-\subsection{Training Results}
-
-\begin{center}
-\begin{tabular}{llll}
-\toprule
-\textbf{Policy} & \textbf{Run} & \textbf{Best mean} & \textbf{Notes} \\
-\midrule
-No DR & \texttt{20260604\_163108} & 2886.57 / 3000 & Best clean policy \\
-Stage 2 DR & \texttt{20260604\_204533\_real\_ready\_stage2} & 2554.50 / 3000 & Current robust policy \\
-Hard hold & \texttt{20260605\_hard\_hold\_10deg\_ent001\_stage2} & 7443.74 / 8400 & 60 s hold, no kick \\
-Elbow kick & \texttt{20260605\_elbow\_kick\_0p5deg\_x3\_fall20\_longrun} & 8233.1 / 8400 & 3 small kicks, saved best \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The Stage 2 best model was selected at 2.29M training steps.  Its best
-evaluation had standard deviation 48.70 and worst episode 2439.84.
-
-\subsection{Robustness Comparison}
-
-Both policies were evaluated under Stage 2 randomized conditions.  This tests
-whether a policy trained in clean simulation can survive realistic
-imperfections.
-
-\begin{figure}[h]
-    \centering
-    \includegraphics[width=0.72\linewidth]{reports/stage2_robustness_comparison.png}
-    \caption{No-DR policy and Stage 2 DR policy under Stage 2 randomized conditions.}
-\end{figure}
-
-\begin{center}
-\begin{tabular}{lrrrrr}
-\toprule
-\textbf{Policy} & \textbf{Mean} & \textbf{Std} & \textbf{Worst} & \textbf{Best} & \textbf{Success} \\
-\midrule
-No DR baseline & 1729.64 & 1336.33 & 84.20 & 2893.91 & 60\% \\
-Stage 2 DR & 2554.67 & 43.38 & 2483.71 & 2638.26 & 100\% \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\subsection{Efficiency Metrics}
-
-\begin{center}
-\begin{tabular}{lrrrr}
-\toprule
-\textbf{Policy} & \textbf{Swing-up} & \textbf{Action RMS} & \textbf{Control Energy} & \textbf{Shoulder Range} \\
-\midrule
-No DR baseline & 0.96 s & 0.347 & 5.07 & 136.1$^\circ$ \\
-Stage 2 DR & 1.02 s & 0.372 & 4.18 & 271.7$^\circ$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\section{Interpretation and Next Steps}
-
-The no-DR policy is excellent in clean simulation but fails in some randomized
-episodes.  Stage 2 DR sacrifices a small amount of nominal performance but is
-far more consistent under realistic imperfections.  Clean simulation can look
-stationary after balance because no noise or disturbance pushes the pendulum
-away from upright; with disturbances, the controller does react.
-
-\begin{center}
-\begin{tabular}{ll}
-\toprule
-\textbf{Artifact} & \textbf{Path} \\
-\midrule
-Clean best model & \texttt{runs/no\_dr/20260604\_163108/best\_model.zip} \\
-Stage 2 best model & \texttt{runs/dr/20260604\_204533\_real\_ready\_stage2/best\_model.zip} \\
-Stage 2 GIF & \texttt{runs/dr/20260604\_204533\_real\_ready\_stage2/best\_model\_eval\_30s.gif} \\
-Hard-hold GIF & \texttt{runs/dr/20260605\_hard\_hold\_10deg\_ent001\_stage2/hard\_hold\_10deg\_eval\_60s.gif} \\
-Elbow-kick best GIF & \texttt{runs/dr/20260605\_elbow\_kick\_0p5deg\_x3\_fall20\_longrun/elbow\_kick\_0p5deg\_x3\_best\_eval\_60s.gif} \\
-Short PDF report & \texttt{reports/stage2\_dr\_report\_20260604.pdf} \\
-Long history archive & \texttt{documentation\_full\_history.tex} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Next steps:
 \begin{enumerate}
-    \item Evaluate the saved elbow-kick best model across many fixed seeds and
-          report success rate, not only a single GIF.
-    \item Measure real elbow free-swing decay to identify pivot friction.
-    \item Measure AS5600 velocity-estimator lag before adding velocity filtering to DR.
-    \item Test the hard-hold policy first on hardware after AS5600 upright zero calibration.
-    \item Add board tilt / external disturbance DR after stationary transfer is validated.
+    \item Test the hardware-mass DR policy on the real pendulum after AS5600
+          upright zero calibration.
+    \item Test the deadband/filter DR policy if the hardware-mass policy is too
+          idealized for real motor or sensor behavior.
+    \item If the deadband/filter policy is still too sensitive on hardware,
+          reduce the added hardware effects further, for example 0--2.5\%
+          motor deadband or $\alpha\in[0.8,0.95]$.
+    \item Identify real system parameters and update the MuJoCo model / DR
+          ranges based on measurements.
+    \item Model the tilting board, place the pendulum on it, and train the next
+          simulation phase with board tilt disturbances.
 \end{enumerate}
 
 \begin{thebibliography}{9}

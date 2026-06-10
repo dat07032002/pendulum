@@ -28,7 +28,8 @@ RUN_ID = os.environ.get("FURUTA_RUN_ID", datetime.now().strftime("%Y%m%d_%H%M%S"
 DR_PROFILE = os.environ.get("FURUTA_DR_PROFILE", "real_ready_stage2")
 RUN_DIR = RUNS_DIR / RUN_ID
 
-N_ENVS = 4
+N_ENVS = int(os.environ.get("FURUTA_N_ENVS", "4"))
+DEVICE  = os.environ.get("FURUTA_DEVICE", "auto")
 TOTAL_STEPS = 3_000_000
 CURRICULUM_STEPS = 1_500_000
 EPISODE_SECONDS = float(os.environ.get("FURUTA_EPISODE_SECONDS", "30.0"))
@@ -57,7 +58,7 @@ def latest_no_dr_run() -> Path:
     return runs[-1]
 
 
-WARM_START_DIR = Path(os.environ.get("FURUTA_WARM_START_DIR", latest_no_dr_run()))
+WARM_START_DIR = Path(os.environ["FURUTA_WARM_START_DIR"]) if "FURUTA_WARM_START_DIR" in os.environ else Path(latest_no_dr_run())
 WARM_START_MODEL = WARM_START_DIR / "best_model.zip"
 WARM_START_NORM = WARM_START_DIR / "vec_normalize_best.pkl"
 if not WARM_START_MODEL.exists() or not WARM_START_NORM.exists():
@@ -101,17 +102,19 @@ shutil.copy2(PROJECT_DIR / "furuta_pendulum.xml", RUN_DIR / "furuta_pendulum.xml
                 "shoulder_damping_range": "+/-5%",
                 "elbow_damping": "0 to 0.00002 N*m*s/rad in real_ready and real_ready_stage2",
                 "motor_torque_scale": "+/-5%",
+                "motor_deadband": "0 to 5% in real_ready and real_ready_stage2",
                 "action_delay_steps": "0 to 1",
                 "shoulder_position_noise_sigma": "0.017 rad at full DR",
                 "shoulder_velocity_noise_sigma": "0.050 rad/s at full DR",
                 "elbow_position_noise_sigma": "0.001 rad at full DR in real_ready and real_ready_stage2",
+                "elbow_velocity": "differentiated from AS5600 position with LP filter alpha in [0.7, 0.9] in real_ready and real_ready_stage2",
                 "shoulder_zero_offset": "+/-1 deg in real_ready_stage2",
                 "elbow_zero_offset": "+/-0.5 deg in real_ready_stage2",
-                "elbow_velocity_filter_alpha": "excluded in real_ready and real_ready_stage2",
             },
             "ppo": {
                 "ent_coef": ENT_COEF,
                 "learning_rate": 1e-4,
+                "device": DEVICE,
             },
         },
         indent=2,
@@ -148,6 +151,7 @@ class CurriculumCallback(BaseCallback):
 
 
 schedule = {"progress": 0.0}
+
 vec_env = make_vec_env(
     lambda: FurutaPendulumEnv(
         dr_schedule=schedule,
@@ -182,7 +186,7 @@ eval_env.norm_reward = False
 model = PPO.load(
     str(WARM_START_MODEL),
     env=vec_env,
-    device="cpu",
+    device=DEVICE,
     ent_coef=ENT_COEF,
     learning_rate=1e-4,
 )

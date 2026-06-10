@@ -1,0 +1,46 @@
+{
+  "run_id": "20260609_deadband5_filter70_90",
+  "mode": "warm_start_dr",
+  "warm_start_run": "runs/dr/20260609_hardware_masses",
+  "domain_randomization": true,
+  "dr_profile": "real_ready_stage2",
+  "n_envs": 32,
+  "total_steps": 3000000,
+  "curriculum_steps": 1500000,
+  "episode_seconds": 30.0,
+  "eval_freq": 10000,
+  "eval_episodes": 20,
+  "checkpoint_freq": 200000,
+  "reward_threshold": 4150.0,
+  "disturbance": {
+    "elbow_kick_deg": 0.0,
+    "elbow_kick_count": 1,
+    "timing": "random angle kicks after balance mode, each delayed 1-10 s"
+  },
+  "reward": {
+    "base": "cos(theta) - 0.1*u^2 - 0.5*max(0, abs(phi)-2.094)^2",
+    "upright_10deg_bonus": 0.2,
+    "upright_5deg_bonus": 0.2,
+    "upright_theta_dot_penalty": "-0.005*theta_dot^2 inside 10 deg",
+    "post_swingup_fall_rule": "terminate if outside 20 deg after first reaching 10 deg"
+  },
+  "dr": {
+    "mass_inertia_range": "+/-5%",
+    "shoulder_damping_range": "+/-5%",
+    "elbow_damping": "0 to 0.00002 N*m*s/rad in real_ready and real_ready_stage2",
+    "motor_torque_scale": "+/-5%",
+    "motor_deadband": "0 to 5% in real_ready and real_ready_stage2",
+    "action_delay_steps": "0 to 1",
+    "shoulder_position_noise_sigma": "0.017 rad at full DR",
+    "shoulder_velocity_noise_sigma": "0.050 rad/s at full DR",
+    "elbow_position_noise_sigma": "0.001 rad at full DR in real_ready and real_ready_stage2",
+    "elbow_velocity": "differentiated from AS5600 position with LP filter alpha in [0.7, 0.9] in real_ready and real_ready_stage2",
+    "shoulder_zero_offset": "+/-1 deg in real_ready_stage2",
+    "elbow_zero_offset": "+/-0.5 deg in real_ready_stage2"
+  },
+  "ppo": {
+    "ent_coef": 0.005,
+    "learning_rate": 0.0001,
+    "device": "cpu"
+  }
+}
