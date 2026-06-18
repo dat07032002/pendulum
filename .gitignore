@@ -10,4 +10,6 @@ pendulum/sanity_check.png
 pendulum/runs/
 sac/runs/
 sac/train_hw.log
-sac/*.log
+*.log
+*.err
+.claude/

@@ -34,7 +34,7 @@
             <body name="arm">
                 <!-- Joint ranges are degrees by default in MJCF. -->
                 <joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
-                       limited="true" range="-120 120" solreflimit="0.005 1"/>
+                       limited="true" range="-135 135" solreflimit="0.005 1"/>
                 <geom mesh="arm" mass="0.04300"/>
                 <body name="pendulum_rod">
                     <!-- qpos[1]=0 is upright; qpos[1]=+/-pi is hanging. -->

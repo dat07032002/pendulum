@@ -46,12 +46,14 @@ def old_to_new_u(u_old: float) -> float:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a trained SAC policy on the hardware.")
     parser.add_argument("--model-dir", required=True, help="Run directory with latest_model.zip + vec_normalize.pkl")
+    parser.add_argument("--best", action="store_true",
+                        help="Load best_model.zip + best_vec_normalize.pkl instead of latest_model.zip")
     parser.add_argument("--port", default="COM5")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--episode-seconds", type=float, default=10.0)
     parser.add_argument("--action-limit", type=float, default=0.7,
                         help="Clamp in the POLICY's action space (pre-conversion)")
-    parser.add_argument("--phi-limit-deg", type=float, default=105.0)
+    parser.add_argument("--phi-limit-deg", type=float, default=120.0)
     parser.add_argument("--old-mapping", action="store_true",
                         help="Policy was trained on the old firmware (pwm=|u|*255); convert actions")
     args = parser.parse_args()
@@ -68,13 +70,16 @@ def main() -> int:
         recenter=False,              # manual start, like manual-recenter training
     )
     venv = DummyVecEnv([lambda: env])
-    vec_norm = VecNormalize.load(str(model_dir / "vec_normalize.pkl"), venv)
+    model_name = "best_model" if args.best else "latest_model"
+    norm_name = "best_vec_normalize.pkl" if args.best else "vec_normalize.pkl"
+    vec_norm = VecNormalize.load(str(model_dir / norm_name), venv)
     vec_norm.training = False
     vec_norm.norm_reward = False
 
-    model = SAC.load(str(model_dir / "latest_model"), device="cpu")
+    model = SAC.load(str(model_dir / model_name), device="cpu")
     print(f"Loaded policy: {model.num_timesteps} training steps "
-          f"({'OLD mapping, converting' if args.old_mapping else 'native mapping'})")
+          f"({'best' if args.best else 'latest'}, "
+          f"{'OLD mapping, converting' if args.old_mapping else 'native mapping'})")
     print(">>> Press Enter to begin...", flush=True)
     try:
         input()
@@ -96,7 +101,9 @@ def main() -> int:
                 obs, rew, term, trunc, info = env.step(np.array([u], dtype=np.float32))
                 total += rew
                 steps += 1
-                if rew > 1.0:
+                theta = float(np.arctan2(obs[1], obs[0]))
+                theta_dot = float(obs[2])
+                if abs(theta) < np.deg2rad(10.0) and abs(theta_dot) < 3.0:
                     upright += 1
                     streak += 1
                     best_streak = max(best_streak, streak)

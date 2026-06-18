@@ -102,7 +102,7 @@ shutil.copy2(PROJECT_DIR / "furuta_pendulum.xml", RUN_DIR / "furuta_pendulum.xml
                 "shoulder_damping_range": "+/-5%",
                 "elbow_damping": "0 to 0.00002 N*m*s/rad in real_ready and real_ready_stage2",
                 "motor_torque_scale": "+/-5%",
-                "motor_deadband": "0 to 5% in real_ready and real_ready_stage2",
+                "motor_deadband": "0 to 3% in real_ready and real_ready_stage2 (real threshold ~3%)",
                 "action_delay_steps": "0 to 1",
                 "shoulder_position_noise_sigma": "0.017 rad at full DR",
                 "shoulder_velocity_noise_sigma": "0.050 rad/s at full DR",

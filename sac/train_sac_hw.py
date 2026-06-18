@@ -10,7 +10,7 @@ Key design points for live-hardware training:
     action_limit; phi / phi_dot safety stops end the episode with the motor off.
 
 Start conservative:
-  python train_sac_hw.py --port COM5 --action-limit 0.6 --episode-seconds 10
+  python train_sac_hw.py --port COM5 --action-limit 0.4 --episode-seconds 15
 """
 
 from __future__ import annotations
@@ -43,6 +43,22 @@ class HardwareCheckpoint(BaseCallback):
         self._vec_env = vec_env
         self._every = every_episodes
         self._episodes = 0
+        self._best_reward = -float("inf")
+        self._best_score = (0, 0, -float("inf"), 0)
+        self._best_meta_path = self._run_dir / "best_meta.json"
+        if self._best_meta_path.exists():
+            try:
+                best_meta = json.loads(self._best_meta_path.read_text())
+                self._best_reward = float(best_meta["reward"])
+                self._best_score = (
+                    int(best_meta.get("upright_steps", 0)),
+                    int(best_meta.get("best_hold_steps", 0)),
+                    self._best_reward,
+                    int(best_meta.get("no_safety_stop", 0)),
+                )
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                self._best_reward = -float("inf")
+                self._best_score = (0, 0, -float("inf"), 0)
 
     def _on_step(self) -> bool:
         for done in self.locals.get("dones", []):
@@ -50,10 +66,37 @@ class HardwareCheckpoint(BaseCallback):
                 self._episodes += 1
                 ep_rew = None
                 infos = self.locals.get("infos", [])
+                info = infos[0] if infos else {}
                 if infos and "episode" in infos[0]:
                     ep_rew = infos[0]["episode"]["r"]
+                upright_steps = int(info.get("upright_steps", 0))
+                best_hold_steps = int(info.get("best_hold_steps", 0))
+                best_hold = float(info.get("best_hold", 0.0))
+                phi_limit_stops = int(info.get("phi_limit_stops", 0))
+                safety_stop = info.get("safety_stop")
                 print(f"--- episode {self._episodes} done"
-                      + (f", reward={ep_rew:.1f}" if ep_rew is not None else ""))
+                      + (f", reward={ep_rew:.1f}" if ep_rew is not None else "")
+                      + f", upright_steps={upright_steps}, best_hold={best_hold:.2f}s"
+                      + (f", safety={safety_stop}" if safety_stop else "")
+                      + (f", phi_limit_stops={phi_limit_stops}" if phi_limit_stops else ""))
+                no_safety_stop = 0 if safety_stop else 1
+                score = (
+                    upright_steps,
+                    best_hold_steps,
+                    float(ep_rew) if ep_rew is not None else -float("inf"),
+                    no_safety_stop,
+                )
+                if ep_rew is not None and not safety_stop and score > self._best_score:
+                    self._best_reward = float(ep_rew)
+                    self._best_score = score
+                    self.save_best(
+                        reward=float(ep_rew),
+                        upright_steps=upright_steps,
+                        best_hold_steps=best_hold_steps,
+                        best_hold=best_hold,
+                        safety_stop=safety_stop,
+                        phi_limit_stops=phi_limit_stops,
+                    )
                 if self._episodes % self._every == 0:
                     self.save_all()
         return True
@@ -64,6 +107,40 @@ class HardwareCheckpoint(BaseCallback):
         self._vec_env.save(str(self._run_dir / "vec_normalize.pkl"))
         print(f"Checkpoint saved to {self._run_dir} (step {self.num_timesteps})")
 
+    def save_best(
+        self,
+        reward: float,
+        upright_steps: int,
+        best_hold_steps: int,
+        best_hold: float,
+        safety_stop: str | None,
+        phi_limit_stops: int,
+    ) -> None:
+        self.model.save(str(self._run_dir / "best_model"))
+        self.model.save_replay_buffer(str(self._run_dir / "best_replay_buffer"))
+        self._vec_env.save(str(self._run_dir / "best_vec_normalize.pkl"))
+        self._best_meta_path.write_text(
+            json.dumps(
+                {
+                    "reward": reward,
+                    "step": self.num_timesteps,
+                    "episode": self._episodes,
+                    "upright_steps": upright_steps,
+                    "best_hold": best_hold,
+                    "best_hold_steps": best_hold_steps,
+                    "safety_stop": safety_stop,
+                    "no_safety_stop": 0 if safety_stop else 1,
+                    "phi_limit_stops": phi_limit_stops,
+                    "best_score": list(self._best_score),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="ascii",
+        )
+        print(f"New best hardware episode: reward={reward:.1f}, upright_steps={upright_steps}, "
+              f"best_hold={best_hold:.2f}s at step {self.num_timesteps}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live SAC training on the real Furuta pendulum.")
@@ -71,25 +148,40 @@ def main() -> int:
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--control-dt", type=float, default=0.02, help="Control period in seconds (50 Hz default)")
     parser.add_argument("--episode-seconds", type=float, default=15.0)
-    parser.add_argument("--action-limit", type=float, default=1.0, help="Clamp actions to +/- this value")
-    parser.add_argument("--phi-limit-deg", type=float, default=90.0, help="Safety stop if |phi| exceeds this")
+    parser.add_argument("--action-limit", type=float, default=0.4, help="Clamp actions to +/- this value")
+    parser.add_argument("--phi-limit-deg", type=float, default=120.0, help="Safety stop if |phi| exceeds this")
     parser.add_argument("--total-steps", type=int, default=100_000, help="~33 min of robot time at 50 Hz")
     parser.add_argument("--learning-starts", type=int, default=1_500, help="Random warm-up steps before learning")
     parser.add_argument("--checkpoint-episodes", type=int, default=5)
     parser.add_argument("--manual-recenter", action="store_true",
                         help="User recenters the arm by hand between episodes (no automatic motor pulses)")
+    parser.add_argument("--swingup-reset", action="store_true",
+                        help="Two-controller mode: energy swing-up in reset() delivers the pendulum "
+                             "to near upright; the RL policy trains purely on the balance/catch")
+    parser.add_argument("--swingup-handoff-deg", type=float, default=30.0,
+                        help="Hand off from swing-up to the policy within this angle of upright")
     parser.add_argument("--resume", default=None, help="Run directory to resume from")
+    parser.add_argument("--resume-best", action="store_true",
+                        help="With --resume, load best_model + best replay/normalization instead of latest")
     parser.add_argument("--warm-start", default=None,
                         help="Run directory to load policy weights from, with a FRESH replay buffer "
                              "(use after changing motor dynamics, e.g. firmware deadband compensation)")
+    parser.add_argument("--warm-start-best", action="store_true",
+                        help="With --warm-start, load best_model + best normalization instead of latest")
     args = parser.parse_args()
+
+    if args.resume_best and not args.resume:
+        parser.error("--resume-best requires --resume")
+    if args.warm_start_best and not args.warm_start:
+        parser.error("--warm-start-best requires --warm-start")
 
     if args.resume:
         run_dir = Path(args.resume)
         if not run_dir.is_absolute():
             run_dir = PROJECT_DIR / run_dir
-        if not (run_dir / "latest_model.zip").exists():
-            raise FileNotFoundError(f"No latest_model.zip in {run_dir}")
+        model_file = "best_model.zip" if args.resume_best else "latest_model.zip"
+        if not (run_dir / model_file).exists():
+            raise FileNotFoundError(f"No {model_file} in {run_dir}")
     else:
         run_dir = PROJECT_DIR / "runs" / "sac_hw" / datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -103,6 +195,8 @@ def main() -> int:
             action_limit=args.action_limit,
             phi_limit_deg=args.phi_limit_deg,
             recenter=not args.manual_recenter,
+            swingup_reset=args.swingup_reset,
+            swingup_handoff_deg=args.swingup_handoff_deg,
         ))
 
     vec_env = DummyVecEnv([make_env])
@@ -122,26 +216,32 @@ def main() -> int:
     )
 
     if args.resume:
-        vec_env = VecNormalize.load(str(run_dir / "vec_normalize.pkl"), vec_env)
+        model_stem = "best_model" if args.resume_best else "latest_model"
+        replay_stem = "best_replay_buffer" if args.resume_best else "replay_buffer"
+        norm_file = "best_vec_normalize.pkl" if args.resume_best else "vec_normalize.pkl"
+        vec_env = VecNormalize.load(str(run_dir / norm_file), vec_env)
         vec_env.training = True
         vec_env.norm_reward = False
-        model = SAC.load(str(run_dir / "latest_model"), env=vec_env, device="cpu")
-        model.load_replay_buffer(str(run_dir / "replay_buffer"))
-        print(f"Resumed from {run_dir}: {model.num_timesteps} steps, "
+        model = SAC.load(str(run_dir / model_stem), env=vec_env, device="cpu")
+        model.load_replay_buffer(str(run_dir / replay_stem))
+        print(f"Resumed {'best' if args.resume_best else 'latest'} from {run_dir}: {model.num_timesteps} steps, "
               f"{model.replay_buffer.size()} transitions in buffer")
     elif args.warm_start:
         warm_dir = Path(args.warm_start)
         if not warm_dir.is_absolute():
             warm_dir = PROJECT_DIR / warm_dir
         # Observation distribution is unchanged by a motor remap: reuse stats.
-        vec_env = VecNormalize.load(str(warm_dir / "vec_normalize.pkl"), vec_env)
+        model_stem = "best_model" if args.warm_start_best else "latest_model"
+        norm_file = "best_vec_normalize.pkl" if args.warm_start_best else "vec_normalize.pkl"
+        vec_env = VecNormalize.load(str(warm_dir / norm_file), vec_env)
         vec_env.training = True
         vec_env.norm_reward = False
-        model = SAC.load(str(warm_dir / "latest_model"), env=vec_env, device="cpu")
+        model = SAC.load(str(warm_dir / model_stem), env=vec_env, device="cpu")
         # Fresh buffer (not loaded) and a short re-exploration phase under the
         # new dynamics before gradient updates resume.
         model.learning_starts = args.learning_starts
-        print(f"Warm start from {warm_dir}: policy weights loaded, replay buffer FRESH")
+        print(f"Warm start from {'best' if args.warm_start_best else 'latest'} {warm_dir}: "
+              "policy weights loaded, replay buffer FRESH")
     else:
         vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
         model = SAC("MlpPolicy", vec_env, verbose=1, device="cpu", **sac_kwargs)
@@ -159,6 +259,7 @@ def main() -> int:
                     "phi_limit_deg": args.phi_limit_deg,
                     "manual_recenter": args.manual_recenter,
                     "warm_start": args.warm_start,
+                    "warm_start_best": args.warm_start_best,
                     "total_steps": args.total_steps,
                     "sac": {k: str(v) for k, v in sac_kwargs.items()},
                 },

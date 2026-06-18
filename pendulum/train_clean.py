@@ -10,8 +10,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import (
     BaseCallback,
+    CallbackList,
     CheckpointCallback,
     EvalCallback,
+    StopTrainingOnNoModelImprovement,
     StopTrainingOnRewardThreshold,
 )
 from stable_baselines3.common.env_util import make_vec_env
@@ -30,7 +32,9 @@ EPISODE_SECONDS = 30.0
 EVAL_FREQ = 10_000
 EVAL_EPISODES = 20
 CHECKPOINT_FREQ = 200_000
-REWARD_THRESHOLD = 2_550
+REWARD_THRESHOLD = float(os.environ.get("FURUTA_REWARD_THRESHOLD", "2550"))
+FIXED_MOTOR_DEADBAND = float(os.environ.get("FURUTA_FIXED_MOTOR_DEADBAND", "0.0"))
+ACTION_LIMIT = float(os.environ.get("FURUTA_ACTION_LIMIT", "1.0"))
 
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 if (RUN_DIR / "run_config.json").exists():
@@ -48,6 +52,8 @@ shutil.copy2(PROJECT_DIR / "furuta_pendulum.xml", RUN_DIR / "furuta_pendulum.xml
             "eval_episodes": EVAL_EPISODES,
             "checkpoint_freq": CHECKPOINT_FREQ,
             "reward_threshold": REWARD_THRESHOLD,
+            "fixed_motor_deadband": FIXED_MOTOR_DEADBAND,
+            "action_limit": ACTION_LIMIT,
             "ppo": {
                 "n_steps": 2048,
                 "batch_size": 64,
@@ -81,13 +87,23 @@ class SaveNormOnBest(BaseCallback):
 
 # Training and evaluation both use the nominal model with no domain randomization.
 vec_env = make_vec_env(
-    lambda: FurutaPendulumEnv(domain_rand=False, episode_seconds=EPISODE_SECONDS),
+    lambda: FurutaPendulumEnv(
+        domain_rand=False,
+        episode_seconds=EPISODE_SECONDS,
+        fixed_motor_deadband=FIXED_MOTOR_DEADBAND,
+        action_limit=ACTION_LIMIT,
+    ),
     n_envs=N_ENVS,
 )
 vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
 eval_env = make_vec_env(
-    lambda: FurutaPendulumEnv(domain_rand=False, episode_seconds=EPISODE_SECONDS),
+    lambda: FurutaPendulumEnv(
+        domain_rand=False,
+        episode_seconds=EPISODE_SECONDS,
+        fixed_motor_deadband=FIXED_MOTOR_DEADBAND,
+        action_limit=ACTION_LIMIT,
+    ),
     n_envs=1,
 )
 eval_env = VecNormalize(
@@ -118,11 +134,16 @@ stop_on_threshold = StopTrainingOnRewardThreshold(
     reward_threshold=REWARD_THRESHOLD,
     verbose=1,
 )
+stop_on_plateau = StopTrainingOnNoModelImprovement(
+    max_no_improvement_evals=100,
+    min_evals=150,
+    verbose=1,
+)
 
 eval_cb = EvalCallback(
     eval_env,
-    callback_on_new_best=save_norm_cb,
-    callback_after_eval=stop_on_threshold,
+    callback_on_new_best=CallbackList([save_norm_cb, stop_on_threshold]),
+    callback_after_eval=stop_on_plateau,
     best_model_save_path=str(RUN_DIR),
     log_path=str(RUN_DIR),
     eval_freq=max(EVAL_FREQ // N_ENVS, 1),

@@ -31,7 +31,9 @@ class FurutaPendulumEnv(gym.Env):
                  dr_profile: str = "all",
                  elbow_kick_deg: float = 0.0,
                  elbow_kick_count: int = 1,
-                 fall_threshold_deg: float = 20.0):
+                 fall_threshold_deg: float = 20.0,
+                 fixed_motor_deadband: float = 0.0,
+                 action_limit: float = 1.0):
         self.model = mujoco.MjModel.from_xml_path(str(XML_PATH))
         self.data = mujoco.MjData(self.model)
 
@@ -43,9 +45,10 @@ class FurutaPendulumEnv(gym.Env):
         # θ_dot: max free-fall from upright = 36.6 rad/s, 1.5x margin → 55
         # φ_dot: terminal speed = τ_max/damping = 0.132/0.01 = 13.2 rad/s, 1.5x → 20
         # φ:     hard joint limit ±135° = ±2.356 rad; use 2.5 for small margin
-        obs_high = np.array([1.0, 1.0, 55.0, 2.5, 20.0], dtype=np.float32)
+        obs_high = np.array([1.0, 1.0, 55.0, 2.2, 20.0], dtype=np.float32)
 
         self._phi_soft_limit = 2.094   # ±120° — penalty activates beyond this
+        self._phi_soft_limit = np.deg2rad(100.0)   # penalty before the +/-120 deg hard stop
         self.observation_space = spaces.Box(
             low=-obs_high, high=obs_high, dtype=np.float32
         )
@@ -83,8 +86,10 @@ class FurutaPendulumEnv(gym.Env):
         self._prev_elbow_angle     = 0.0
         self._elbow_dot_filtered   = 0.0
         self._filter_alpha         = 0.7
-        self._motor_deadband_max   = 0.05   # up to 5% of full command
+        self._motor_deadband_max   = 0.03   # DR residual deadband; fixed deadband is configured separately.
+        self._fixed_motor_deadband = float(np.clip(fixed_motor_deadband, 0.0, 1.0))
         self._motor_deadband       = 0.0
+        self._action_limit         = float(np.clip(action_limit, 0.0, 1.0))
         self._action_buf           = collections.deque([0.0], maxlen=1)
         self._balance_mode         = False
         self._balance_steps        = 0
@@ -246,7 +251,7 @@ class FurutaPendulumEnv(gym.Env):
         else:
             self._action_buf     = collections.deque([0.0], maxlen=1)
             self._filter_alpha   = 0.7
-            self._motor_deadband = 0.0
+            self._motor_deadband = self._fixed_motor_deadband
 
         mujoco.mj_setConst(self.model, self.data)
 
@@ -269,7 +274,7 @@ class FurutaPendulumEnv(gym.Env):
 
     # ------------------------------------------------------------------
     def step(self, action):
-        self._action_buf.append(float(np.clip(action[0], -1.0, 1.0)))
+        self._action_buf.append(float(np.clip(action[0], -self._action_limit, self._action_limit)))
         u_delayed = self._action_buf[0]
         # motor deadband: commands below threshold produce no torque
         self.data.ctrl[0] = 0.0 if abs(u_delayed) < self._motor_deadband else u_delayed

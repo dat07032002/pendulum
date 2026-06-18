@@ -1,0 +1,9 @@
+pwm,elapsed_ms,stop_reason,stop_phi_deg,final_phi_deg,max_abs_phi_deg,samples
+60,500,time limit,60.23,60.23,60.23,31
+-60,500,time limit,-83.08,-84.46,85.15,31
+70,500,time limit,92.08,94.15,94.15,31
+-70,450,angle limit,-95.54,-101.08,101.77,31
+80,350,angle limit,92.08,98.31,98.31,31
+-80,300,angle limit,-91.38,-102.46,102.46,31
+90,300,angle limit,97.62,107.31,108.0,32
+-90,250,angle limit,-92.77,-110.08,110.77,31
