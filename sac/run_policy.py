@@ -56,6 +56,9 @@ def main() -> int:
     parser.add_argument("--phi-limit-deg", type=float, default=120.0)
     parser.add_argument("--old-mapping", action="store_true",
                         help="Policy was trained on the old firmware (pwm=|u|*255); convert actions")
+    parser.add_argument("--lift-to-catch", action="store_true",
+                        help="Deploy a balance policy: lift the pendulum upright by hand, policy catches it")
+    parser.add_argument("--lift-handoff-deg", type=float, default=10.0)
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -68,6 +71,8 @@ def main() -> int:
         action_limit=1.0,            # we clamp ourselves, pre-conversion
         phi_limit_deg=args.phi_limit_deg,
         recenter=False,              # manual start, like manual-recenter training
+        lift_start=args.lift_to_catch,
+        lift_handoff_deg=args.lift_handoff_deg,
     )
     venv = DummyVecEnv([lambda: env])
     model_name = "best_model" if args.best else "latest_model"

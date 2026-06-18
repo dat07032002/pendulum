@@ -51,8 +51,8 @@ class FurutaHardwareEnv(gym.Env):
     def __init__(
         self,
         port: str = "COM5",
-        baud: int = 115200,
-        control_dt: float = 0.02,
+        baud: int = 921600,
+        control_dt: float = 0.01,   # 100 Hz control (was 50 Hz) for tighter balance
         episode_seconds: float = 15.0,
         action_limit: float = 1.0,
         phi_limit_deg: float = 120.0,       # episode stop = firmware backstop (intended full range)
@@ -73,6 +73,8 @@ class FurutaHardwareEnv(gym.Env):
         swingup_u: float = 0.28,
         swingup_omega2: float = 100.0,
         swingup_timeout: float = 12.0,
+        lift_start: bool = False,           # deploy: user lifts pendulum upright, policy catches
+        lift_handoff_deg: float = 10.0,
     ):
         super().__init__()
         obs_high = np.array([1.0, 1.0, 55.0, 2.5, 20.0], dtype=np.float32)
@@ -114,6 +116,8 @@ class FurutaHardwareEnv(gym.Env):
         self._swingup_u = abs(float(swingup_u))
         self._swingup_omega2 = float(swingup_omega2)
         self._swingup_timeout = float(swingup_timeout)
+        self._lift_start = bool(lift_start)
+        self._lift_handoff = np.deg2rad(float(lift_handoff_deg))
 
         self._step_count = 0
         self._balance_mode = False
@@ -278,9 +282,56 @@ class FurutaHardwareEnv(gym.Env):
         self._send_u(0.0)
 
     # ------------------------------------------------------------------
+    def _start_obs(self, obs: np.ndarray) -> tuple:
+        """Common episode-start bookkeeping; returns (obs, {})."""
+        obs = self._apply_theta_trim(obs)
+        self._step_count = 0
+        self._balance_mode = False
+        self._episode_upright_steps = 0
+        self._episode_upright_streak = 0
+        self._episode_best_hold_steps = 0
+        self._episode_phi_limit_stops = 0
+        self._frozen_steps = 0
+        self._last_cos, self._last_sin = float(obs[0]), float(obs[1])
+        self._last_obs = obs
+        self._next_tick = time.perf_counter() + self.control_dt
+        return obs, {}
+
+    def _lift_start_reset(self) -> tuple:
+        """Deploy mode: motor off; wait for the user to lift the pendulum near
+        upright, then hand control to the policy. No swing-up, no recenter."""
+        print("\a>>> Lift the pendulum to upright; the policy will catch it...", flush=True)
+        settled_since = None
+        last_reminder = time.perf_counter()
+        obs = None
+        while True:
+            self._send_u(0.0)  # user moves the pendulum by hand
+            candidate = self._wait_for_obs()
+            if candidate is None:
+                continue
+            obs = candidate
+            theta = float(np.arctan2(candidate[1], candidate[0]))
+            now = time.perf_counter()
+            if abs(theta) < self._lift_handoff and abs(candidate[2]) < 3.0:
+                if settled_since is None:
+                    settled_since = now
+                elif now - settled_since >= 0.10:
+                    break
+            else:
+                settled_since = None
+                if now - last_reminder >= 4.0:
+                    print(f">>> waiting for lift (theta={np.degrees(theta):+.1f}deg)...", flush=True)
+                    last_reminder = now
+        print(f"\a>>> caught (theta={np.degrees(float(np.arctan2(obs[1], obs[0]))):+.1f}deg) "
+              f"-> policy active, let go", flush=True)
+        return self._start_obs(obs)
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self._send_u(0.0)
+
+        if self._lift_start:
+            return self._lift_start_reset()
 
         manual = not self._recenter
         if manual:

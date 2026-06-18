@@ -126,6 +126,15 @@ void updateAS5600Health() {
   if (!readAS5600Bytes(AS5600_MAGNITUDE_H, b, 2)) return;
   g_as5600_mag = ((b[0] & 0x0F) << 8) | b[1];
   g_as5600_health_valid = true;
+  // Health printed here (every AS5600_HEALTH_MS), not per-step, to keep the
+  // per-step obs line short enough for a high control rate.
+  Serial.print("# health as_md="); Serial.print((g_as5600_status & 0x20) ? 1 : 0);
+  Serial.print(" as_ml="); Serial.print((g_as5600_status & 0x10) ? 1 : 0);
+  Serial.print(" as_mh="); Serial.print((g_as5600_status & 0x08) ? 1 : 0);
+  Serial.print(" as_agc="); Serial.print(g_as5600_agc);
+  Serial.print(" as_mag="); Serial.print(g_as5600_mag);
+  Serial.print(" i2cfail="); Serial.print(g_i2c_fail);
+  Serial.print(" rawrej="); Serial.println(g_raw_jump_reject);
 }
 
 uint16_t readAS5600Raw() {
@@ -219,7 +228,7 @@ void handleCommand(String cmd) {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);   // fast link so the long obs line doesn't cap the rate
   delay(500);
 
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -286,7 +295,7 @@ void loop() {
   if (first_sample) {
     theta_prev = theta; phi_prev = phi; t_prev_us = t_now_us;
     first_sample = false;
-    delay(10);
+    delay(5);   // ~200 Hz firmware loop -> fresh obs for 100 Hz PC control
     return;
   }
 
@@ -304,14 +313,8 @@ void loop() {
   Serial.print(" phi_deg="); Serial.print(phi * 180.0 / PI, 2);
   Serial.print(" u="); Serial.print(current_u, 3);
   Serial.print(" i2cfail="); Serial.print(g_i2c_fail);
-  Serial.print(" rawrej="); Serial.print(g_raw_jump_reject);
-  Serial.print(" as_ok="); Serial.print(g_as5600_health_valid ? 1 : 0);
-  Serial.print(" as_md="); Serial.print((g_as5600_status & 0x20) ? 1 : 0);
-  Serial.print(" as_ml="); Serial.print((g_as5600_status & 0x10) ? 1 : 0);
-  Serial.print(" as_mh="); Serial.print((g_as5600_status & 0x08) ? 1 : 0);
-  Serial.print(" as_agc="); Serial.print(g_as5600_agc);
-  Serial.print(" as_mag="); Serial.println(g_as5600_mag);
+  Serial.print(" rawrej="); Serial.println(g_raw_jump_reject);
 
   theta_prev = theta; phi_prev = phi; t_prev_us = t_now_us;
-  delay(10);
+  delay(5);   // ~200 Hz firmware loop -> fresh obs for 100 Hz PC control
 }

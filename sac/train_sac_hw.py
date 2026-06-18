@@ -145,8 +145,8 @@ class HardwareCheckpoint(BaseCallback):
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live SAC training on the real Furuta pendulum.")
     parser.add_argument("--port", default="COM5", help="Serial port, e.g. COM5")
-    parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--control-dt", type=float, default=0.02, help="Control period in seconds (50 Hz default)")
+    parser.add_argument("--baud", type=int, default=921600)
+    parser.add_argument("--control-dt", type=float, default=0.01, help="Control period in seconds (100 Hz default)")
     parser.add_argument("--episode-seconds", type=float, default=15.0)
     parser.add_argument("--action-limit", type=float, default=0.4, help="Clamp actions to +/- this value")
     parser.add_argument("--phi-limit-deg", type=float, default=120.0, help="Safety stop if |phi| exceeds this")
