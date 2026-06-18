@@ -12,7 +12,7 @@
  * Arm encoder (phi): Nidec quadrature CHA/CHB on D34/D35 (5V via level shifter).
  *   ~200 CPR (A-only CHANGE decode).  phi = count * 2*pi / 200.
  *
- * Pendulum (theta): AS5600 on I2C 21/22.  UPRIGHT_RAW = 27 (hanging = -180 deg).
+ * Pendulum (theta): AS5600 on I2C 21/22.  UPRIGHT_RAW = 3977 (hanging = ±180 deg).
  *
  * Serial protocol (unchanged from the brushed firmware):
  *   commands: "u <float>", "s", "z"
@@ -34,7 +34,7 @@
 #define AS5600_MAGNITUDE_H 0x1B
 #define SDA_PIN 21
 #define SCL_PIN 22
-const int UPRIGHT_RAW = 27;            // hanging measured at 182.37 deg
+const int UPRIGHT_RAW = 3977;          // recalibrated: hanging read -167.2deg, corrected +12.8deg
 const int AS5600_MAX_RAW_STEP = 768;   // reject impossible >67.5deg jumps per sample
 const unsigned long AS5600_HEALTH_MS = 500;
 
@@ -56,7 +56,7 @@ const float SHOULDER_COUNTS_PER_REV = 200.0;
 // --- filters / safety ---
 const float THETA_VEL_ALPHA = 0.5;   // was 0.25 (too laggy); 0.5 = less theta_dot lag
 const float PHI_VEL_ALPHA = 0.85;
-const float ACTION_ZERO_ZONE = 0.005;
+const float ACTION_ZERO_ZONE = 0.05;   // 5% measured motor deadband
 const unsigned long WATCHDOG_MS = 200;
 const float PHI_BACKSTOP_RAD = 120.0 * PI / 180.0;
 

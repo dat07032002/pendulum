@@ -6,7 +6,7 @@ The sim runs far faster than real time with full domain randomization, so this
 can do millions of balance steps in minutes -- no cable pops, no recentering.
 Deploy the result on hardware with:
 
-  python run_policy.py --model-dir runs/sac_sim/<dir> --best --lift-to-catch --action-limit 0.4
+  python run_policy.py --model-dir runs/sac_sim/<dir> --best --lift-to-catch --action-limit 1.0
 
 The saved vec_normalize.pkl carries the obs normalization to hardware (obs
 convention is identical: [cos th, sin th, th_dot, phi, phi_dot], th=0 upright).
@@ -34,7 +34,9 @@ class SimEvalCheckpoint(BaseCallback):
     """Periodically eval (deterministic, DR off) and save latest + best."""
 
     def __init__(self, run_dir: Path, vec_env: VecNormalize, eval_every: int,
-                 action_limit: float, episode_seconds: float, velocity_control: bool = True):
+                 action_limit: float, episode_seconds: float, velocity_control: bool = True,
+                 start_vel: float = 3.0, start_angle_deg: float = 10.0,
+                 fall_threshold_deg: float = 45.0):
         super().__init__()
         self._run_dir = run_dir
         self._vec_env = vec_env
@@ -42,6 +44,9 @@ class SimEvalCheckpoint(BaseCallback):
         self._action_limit = action_limit
         self._episode_seconds = episode_seconds
         self._velocity_control = velocity_control
+        self._start_vel = start_vel
+        self._start_angle_deg = start_angle_deg
+        self._fall_threshold_deg = fall_threshold_deg
         self._best_hold = -1.0
         self._last_eval = 0
 
@@ -55,7 +60,10 @@ class SimEvalCheckpoint(BaseCallback):
         (mean reward, mean longest-hold seconds)."""
         env = FurutaBalanceSimEnv(domain_rand=False, action_limit=self._action_limit,
                                   episode_seconds=self._episode_seconds,
-                                  velocity_control=self._velocity_control)
+                                  velocity_control=self._velocity_control,
+                                  start_vel=self._start_vel,
+                                  start_angle_deg=self._start_angle_deg,
+                                  fall_threshold_deg=self._fall_threshold_deg)
         rewards, holds = [], []
         for ep in range(5):
             obs, _ = env.reset(seed=1000 + ep)
@@ -94,7 +102,7 @@ class SimEvalCheckpoint(BaseCallback):
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train a SAC balance policy in the matched sim.")
     parser.add_argument("--total-steps", type=int, default=1_000_000)
-    parser.add_argument("--action-limit", type=float, default=0.4)
+    parser.add_argument("--action-limit", type=float, default=1.0)
     parser.add_argument("--episode-seconds", type=float, default=8.0)
     parser.add_argument("--n-envs", type=int, default=4, help="Parallel sim envs for faster data")
     parser.add_argument("--no-domain-rand", action="store_true")
@@ -102,6 +110,12 @@ def main() -> int:
                         help="Torque control instead of Nidec speed control (diagnostic / alt motor)")
     parser.add_argument("--eval-every", type=int, default=20_000)
     parser.add_argument("--resume", default=None, help="Run dir to resume (loads latest)")
+    parser.add_argument("--start-vel", type=float, default=15.0,
+                        help="Max |theta_dot| at episode start [rad/s] — 15 matches hardware arrival speed")
+    parser.add_argument("--start-angle", type=float, default=20.0,
+                        help="Max |theta| at episode start [deg] — matches --switch-in-deg on hardware")
+    parser.add_argument("--fall-threshold", type=float, default=45.0,
+                        help="Terminate episode when |theta| exceeds this [deg] (default 45)")
     args = parser.parse_args()
 
     domain_rand = not args.no_domain_rand
@@ -112,13 +126,17 @@ def main() -> int:
     else:
         run_dir = PROJECT_DIR / "runs" / "sac_sim" / datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Sim SAC run dir: {run_dir}  (domain_rand={domain_rand}, n_envs={args.n_envs})")
+    print(f"Sim SAC run dir: {run_dir}  (domain_rand={domain_rand}, n_envs={args.n_envs}, "
+          f"start_vel={args.start_vel}, start_angle={args.start_angle})")
 
     velocity_control = not args.torque
     def make_env():
         return FurutaBalanceSimEnv(domain_rand=domain_rand, action_limit=args.action_limit,
                                    episode_seconds=args.episode_seconds,
-                                   velocity_control=velocity_control)
+                                   velocity_control=velocity_control,
+                                   start_vel=args.start_vel,
+                                   start_angle_deg=args.start_angle,
+                                   fall_threshold_deg=args.fall_threshold)
 
     vec_env = DummyVecEnv([make_env for _ in range(args.n_envs)])
 
@@ -149,7 +167,9 @@ def main() -> int:
         model = SAC("MlpPolicy", vec_env, verbose=0, device="auto", **sac_kwargs)
 
     cb = SimEvalCheckpoint(run_dir, vec_env, args.eval_every, args.action_limit,
-                           args.episode_seconds, velocity_control=velocity_control)
+                           args.episode_seconds, velocity_control=velocity_control,
+                           start_vel=args.start_vel, start_angle_deg=args.start_angle,
+                           fall_threshold_deg=args.fall_threshold)
     try:
         model.learn(total_timesteps=args.total_steps, reset_num_timesteps=not args.resume,
                     progress_bar=True, callback=cb)

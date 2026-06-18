@@ -77,7 +77,7 @@ class FurutaPendulumEnv(gym.Env):
         self._elbow_damp_dr_max    = 0.003
         self._real_ready_elbow_damp_dr_max = 0.00002
         self._motor_gear_dr_range  = 0.05
-        self._max_delay            = 1
+        self._max_delay            = 2
         self._shoulder_zero_offset_range = np.deg2rad(1.0)
         self._elbow_zero_offset_range    = np.deg2rad(0.5)
         self._shoulder_zero_offset = 0.0

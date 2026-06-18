@@ -48,7 +48,7 @@ class FurutaBalanceSimEnv(gym.Env):
         fall_threshold_deg: float = 30.0,
         start_angle_deg: float = 10.0,   # |theta| spread at start (matches 10deg lift-to-catch)
         start_vel: float = 3.0,          # |theta_dot| spread at start (matches handoff |thd|<3)
-        action_limit: float = 0.4,
+        action_limit: float = 1.0,
         velocity_control: bool = True,   # True = Nidec speed control; False = torque control
     ):
         self.model = mujoco.MjModel.from_xml_path(str(XML_PATH))
@@ -101,15 +101,19 @@ class FurutaBalanceSimEnv(gym.Env):
         self._tight_hold_vel = 1.5
 
         # --- Nidec speed-control actuator (nominal; DR perturbs these) ---
-        # u=1 -> ~10 rad/s arm (we measured ~580 deg/s); deadband floor MIN/MAX=0.24.
-        self._nom_max_arm_speed = 10.0     # rad/s at |u|=1
+        # sysid Phase 1 (terminal velocity sweep): at u=0.30, phi_dot_ss ~12.8 rad/s.
+        # Firmware: speed = MIN_SPEED + |u|*(MAX_SPEED-MIN_SPEED) = 0.06+0.30*0.19 = 0.117.
+        # Motor max arm speed = 12.8/0.117 ~109 rad/s; at full output (MAX_SPEED=0.25):
+        #   max_arm_speed = 109 * 0.25 = ~27 rad/s.
+        # min_frac = MIN_SPEED/MAX_SPEED = 0.06/0.25 = 0.24 (unchanged).
+        self._nom_max_arm_speed = 27.0     # rad/s at |u|=1 (sysid-updated from 10.0)
         self._nom_min_frac = 0.24          # MIN_SPEED/MAX_SPEED firmware ratio (deadband comp)
         self._nom_vel_kv = 3.0             # velocity-servo stiffness (high; torque clamp bounds it)
-        self._nom_tau_max = 0.13           # motor torque ceiling [N m] (~the model's gear value)
-        self._nom_deadband = 0.005         # |u| below this = hold (firmware ACTION_ZERO_ZONE)
+        self._nom_tau_max = 0.050          # motor torque ceiling [N m] (Nidec 24H404H160 peak at 12V)
+        self._nom_deadband = 0.05          # |u| below this = hold (firmware ACTION_ZERO_ZONE = 5%)
         # Voltage / DC-motor model (real Nidec): torque droops with arm speed.
-        self._nom_free_speed_max = 10.0    # arm free-run speed at full drive [rad/s] (~580 deg/s)
-        self._nom_tau_stall = 0.13         # stall torque at full drive [N m] (uncertain -> wide DR)
+        self._nom_free_speed_max = 27.0    # arm free-run speed at full drive [rad/s] (sysid-updated)
+        self._nom_tau_stall = 0.050        # stall torque at full drive [N m] (Nidec 24H404H160 at 12V)
 
         # --- Cable-wrap spring (the hardware nemesis); nominal small, DR widens ---
         self._nom_spring_k = 0.015         # restoring torque per rad of arm wrap [N m/rad]
@@ -149,8 +153,8 @@ class FurutaBalanceSimEnv(gym.Env):
         self._free_speed_max = jitter(self._nom_free_speed_max, 0.35)
         # Wide stall-torque DR incl. the weak end -- real authority is uncertain
         # and the hardware looked under-actuated.
-        self._tau_stall = self._nom_tau_stall if p == 0 else float(rng.uniform(0.05, 0.20))
-        self._deadband = self._nom_deadband if p == 0 else float(rng.uniform(0.0, 0.03))
+        self._tau_stall = self._nom_tau_stall if p == 0 else float(rng.uniform(0.02, 0.08))
+        self._deadband = self._nom_deadband if p == 0 else float(rng.uniform(0.02, 0.08))
         self._filter_alpha = self._nom_filter_alpha if p == 0 else float(rng.uniform(0.35, 0.7))
 
         # Cable spring: from ~0 up to ~3x nominal, with a randomized neutral.

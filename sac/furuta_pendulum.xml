@@ -1,52 +1,51 @@
 <mujoco model="furuta_pendulum">
-    <default>
-        <!-- remap SolidWorks X-up to MuJoCo Z-up -->
-        <geom type="mesh" xyaxes="0 0 1 1 0 0"/>
-    </default>
 
-    <contact>
-        <exclude body1="fixed_motor" body2="arm"/>
-        <exclude body1="arm" body2="pendulum_rod"/>
-        <exclude body1="fixed_motor" body2="pendulum_rod"/>
-    </contact>
+  <contact>
+    <exclude body1="base" body2="arm"/>
+    <exclude body1="arm" body2="rod"/>
+    <exclude body1="base" body2="rod"/>
+  </contact>
 
-    <visual>
-        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
-        <rgba haze="0.15 0.25 0.35 1"/>
-    </visual>
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.1 0.1 0.1"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+  </visual>
 
-    <asset>
-        <!-- SolidWorks exports in mm, scale to meters -->
-        <!-- refpos re-centers all meshes around the motor's center in SolidWorks global frame (mm) -->
-        <mesh name="fixed_motor"  file="cad/fixed_motor.stl"  scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
-        <mesh name="arm"          file="cad/arm_2.STL"        scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
-        <mesh name="pendulum_rod" file="cad/rod_2.STL"        scale="0.001 0.001 0.001" refpos="602.303 877.409 1307.925"/>
-    </asset>
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1"  diffuse="0.8 0.8 0.8"/>
+    <light pos="0.3 0.3 0.8" dir="-1 -1 -1" diffuse="0.4 0.4 0.4"/>
 
-    <worldbody>
-        <!-- lights -->
-        <light pos="0 0 1.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
-        <light pos="0.5 0.5 1" dir="-1 -1 -1" diffuse="0.4 0.4 0.4"/>
+    <!-- Motor body.  Top face of cylinder is at world z = 0.10 + 0.030 = 0.130 m -->
+    <body name="base" pos="0 0 0.10">
+      <geom type="cylinder" size="0.018 0.030" mass="0.092" rgba="0.35 0.35 0.35 1"/>
 
-<!-- motor fixed to world at 15cm height -->
-        <body name="fixed_motor" pos="0 0 0.15">
-            <geom mesh="fixed_motor" mass="0.09200"/>
-            <body name="arm">
-                <!-- Joint ranges are degrees by default in MJCF. -->
-                <joint name="shoulder" pos="0 0 0.02575" axis="0 0 1" damping="0.01"
-                       limited="true" range="-120 120" solreflimit="0.005 1"/>
-                <geom mesh="arm" mass="0.04300"/>
-                <body name="pendulum_rod">
-                    <!-- qpos[1]=0 is upright; qpos[1]=+/-pi is hanging. -->
-                    <joint name="elbow" pos="0 -0.049505 0.056747" axis="0 1 0" ref="0"/>
-                    <geom mesh="pendulum_rod" mass="0.01500"/>
-                </body>
-            </body>
+      <!-- Arm body origin placed at the top of the motor (the shaft) -->
+      <body name="arm" pos="0 0 0.030">
+        <!-- Shoulder: arm sweeps the horizontal plane (rotation about Z) -->
+        <joint name="shoulder" pos="0 0 0" axis="0 0 1"
+               damping="0.00329" limited="true" range="-120 120"
+               solreflimit="0.005 1"/>
+        <!-- Arm: 40 mm from shoulder pivot to elbow pivot, measured hardware -->
+        <geom type="capsule" fromto="0 0 0  0.040 0 0"
+              size="0.006" mass="0.030" rgba="0.7 0.5 0.2 1"/>
+
+        <!-- Rod body origin at the elbow pivot (tip of arm) -->
+        <body name="rod" pos="0.040 0 0">
+          <!-- Elbow: pendulum swings in the vertical plane containing the arm -->
+          <!-- qpos=0 is UPRIGHT (+Z); qpos=+/-pi is HANGING (-Z)            -->
+          <joint name="elbow" pos="0 0 0" axis="1 0 0" ref="0"/>
+          <!-- Rod: 75 mm, pointing +Z at qpos=0 (upright), measured hardware -->
+          <geom type="capsule" fromto="0 0 0  0 0 0.075"
+                size="0.005" mass="0.025" rgba="0.2 0.5 0.85 1"/>
         </body>
-    </worldbody>
+      </body>
+    </body>
+  </worldbody>
 
-    <actuator>
-        <!-- Normalized control maps linearly to the motor's +/-0.132 N m torque. -->
-        <motor name="shoulder_motor" joint="shoulder" gear="0.132" ctrlrange="-1 1"/>
-    </actuator>
+  <actuator>
+    <!-- u in [-1,1] -> shoulder torque in [-0.050, 0.050] N*m (Nidec 24H404H160 at 12V) -->
+    <!-- sim_balance_env.py reconfigures this as a velocity servo at runtime              -->
+    <motor name="shoulder_motor" joint="shoulder" gear="0.050" ctrlrange="-1 1"/>
+  </actuator>
+
 </mujoco>
