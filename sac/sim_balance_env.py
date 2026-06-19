@@ -50,6 +50,7 @@ class FurutaBalanceSimEnv(gym.Env):
         start_vel: float = 3.0,          # |theta_dot| spread at start (matches handoff |thd|<3)
         action_limit: float = 1.0,
         velocity_control: bool = True,   # True = Nidec speed control; False = torque control
+        curriculum: bool = False,        # ramp difficulty (arrival speed/angle + DR) easy->hard
     ):
         self.model = mujoco.MjModel.from_xml_path(str(XML_PATH))
         self.model.opt.timestep = 0.002
@@ -82,6 +83,12 @@ class FurutaBalanceSimEnv(gym.Env):
         self._fall_threshold_rad = np.deg2rad(float(fall_threshold_deg))
         self._start_angle = np.deg2rad(float(start_angle_deg))
         self._start_vel = float(start_vel)
+        # Curriculum: progress 0 (easy) -> 1 (full difficulty). Ramps arrival
+        # speed/angle and DR strength; set during training via set_progress().
+        self._curriculum = bool(curriculum)
+        self._curriculum_progress = 1.0
+        self._start_vel_floor = 1.0            # rad/s at progress 0 (near-rest)
+        self._start_angle_floor = np.deg2rad(4.0)
 
         obs_high = np.array([1.0, 1.0, 70.0, 2.4, 20.0], dtype=np.float32)
         self.observation_space = spaces.Box(-obs_high, obs_high, dtype=np.float32)
@@ -102,18 +109,17 @@ class FurutaBalanceSimEnv(gym.Env):
 
         # --- Nidec speed-control actuator (nominal; DR perturbs these) ---
         # sysid Phase 1 (terminal velocity sweep): at u=0.30, phi_dot_ss ~12.8 rad/s.
-        # Firmware: speed = MIN_SPEED + |u|*(MAX_SPEED-MIN_SPEED) = 0.06+0.30*0.19 = 0.117.
-        # Motor max arm speed = 12.8/0.117 ~109 rad/s; at full output (MAX_SPEED=0.25):
-        #   max_arm_speed = 109 * 0.25 = ~27 rad/s.
-        # min_frac = MIN_SPEED/MAX_SPEED = 0.06/0.25 = 0.24 (unchanged).
-        self._nom_max_arm_speed = 27.0     # rad/s at |u|=1 (sysid-updated from 10.0)
-        self._nom_min_frac = 0.24          # MIN_SPEED/MAX_SPEED firmware ratio (deadband comp)
-        self._nom_vel_kv = 3.0             # velocity-servo stiffness (high; torque clamp bounds it)
-        self._nom_tau_max = 0.050          # motor torque ceiling [N m] (Nidec 24H404H160 peak at 12V)
+        # Grounded by sysid at MAX_SPEED=0.40 (re-run after the 0.25->0.40 bump):
+        #   slope (free-speed) ~54-60 rad/s; gear=0.035 N·m at I_arm=1e-4, but
+        #   I_arm is ~1.6-2e-4 (arm+rotor) so real stall torque ~0.055. Wide DR.
+        self._nom_max_arm_speed = 55.0     # rad/s at |u|=1 (sysid slope, backstop-corrected)
+        self._nom_min_frac = 0.15          # MIN_SPEED/MAX_SPEED = 0.06/0.40
+        self._nom_vel_kv = 3.0             # velocity-servo stiffness (velocity mode only)
+        self._nom_tau_max = 0.055          # motor torque ceiling [N m] (velocity mode)
         self._nom_deadband = 0.05          # |u| below this = hold (firmware ACTION_ZERO_ZONE = 5%)
         # Voltage / DC-motor model (real Nidec): torque droops with arm speed.
-        self._nom_free_speed_max = 27.0    # arm free-run speed at full drive [rad/s] (sysid-updated)
-        self._nom_tau_stall = 0.050        # stall torque at full drive [N m] (Nidec 24H404H160 at 12V)
+        self._nom_free_speed_max = 55.0    # arm free-run speed at full drive [rad/s] (sysid @0.40)
+        self._nom_tau_stall = 0.055        # stall torque [N m] (gear 0.035 * I_arm correction)
 
         # --- Cable-wrap spring (the hardware nemesis); nominal small, DR widens ---
         self._nom_spring_k = 0.015         # restoring torque per rad of arm wrap [N m/rad]
@@ -121,7 +127,10 @@ class FurutaBalanceSimEnv(gym.Env):
 
         # --- Sensor / latency (theta_dot filter + action delay) ---
         self._nom_filter_alpha = 0.5       # matches firmware THETA_VEL_ALPHA
-        self._nom_shoulder_damp = float(self.model.dof_damping[0])
+        # The voltage model's back-EMF term (tau_stall/free_speed) IS the velocity
+        # drag, grounded to the sysid terminal speed (27 rad/s). The MuJoCo joint
+        # damping must be ~0 to avoid double-counting (it gave a 9.7 rad/s arm).
+        self._nom_shoulder_damp = 0.0
         self._nom_arm_mass = float(self.model.body_mass[2])
         self._nom_rod_mass = float(self.model.body_mass[3])
         self._nom_arm_inertia = self.model.body_inertia[2].copy()
@@ -135,7 +144,9 @@ class FurutaBalanceSimEnv(gym.Env):
     def _reset_episode_params(self) -> None:
         """Sample this episode's physical parameters (domain randomization)."""
         rng = getattr(self, "np_random", None)
-        p = 1.0 if self._domain_rand else 0.0
+        # DR strength follows the curriculum (less randomization early, full late).
+        dr_scale = self._curriculum_progress if self._curriculum else 1.0
+        p = dr_scale if self._domain_rand else 0.0
 
         def jitter(nom, frac):
             if p == 0 or rng is None:
@@ -153,7 +164,7 @@ class FurutaBalanceSimEnv(gym.Env):
         self._free_speed_max = jitter(self._nom_free_speed_max, 0.35)
         # Wide stall-torque DR incl. the weak end -- real authority is uncertain
         # and the hardware looked under-actuated.
-        self._tau_stall = self._nom_tau_stall if p == 0 else float(rng.uniform(0.02, 0.08))
+        self._tau_stall = self._nom_tau_stall if p == 0 else float(rng.uniform(0.035, 0.090))
         self._deadband = self._nom_deadband if p == 0 else float(rng.uniform(0.02, 0.08))
         self._filter_alpha = self._nom_filter_alpha if p == 0 else float(rng.uniform(0.35, 0.7))
 
@@ -169,8 +180,9 @@ class FurutaBalanceSimEnv(gym.Env):
         self._phi_pos_noise = 0.0 if p == 0 else float(rng.uniform(0.0, 0.02))
         self._phi_vel_noise = 0.0 if p == 0 else float(rng.uniform(0.0, 0.08))
 
-        # Mass / damping randomization.
-        self.model.dof_damping[0] = jitter(self._nom_shoulder_damp, 0.3)
+        # Mass / damping randomization. Only a small residual bearing friction
+        # on top of the motor's back-EMF drag (which is in the voltage model).
+        self.model.dof_damping[0] = 0.0 if p == 0 else float(rng.uniform(0.0, 0.0006))
         self.model.body_mass[2] = self._nom_arm_mass * jitter(1.0, 0.1)
         self.model.body_mass[3] = self._nom_rod_mass * jitter(1.0, 0.1)
         self.model.body_inertia[2] = self._nom_arm_inertia * (self.model.body_mass[2] / self._nom_arm_mass)
@@ -204,6 +216,10 @@ class FurutaBalanceSimEnv(gym.Env):
                         dtype=np.float32)
 
     # ------------------------------------------------------------------
+    def set_progress(self, p: float) -> None:
+        """Curriculum progress 0 (easy) -> 1 (full difficulty). Called during training."""
+        self._curriculum_progress = float(np.clip(p, 0.0, 1.0))
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if seed is not None:
@@ -213,9 +229,13 @@ class FurutaBalanceSimEnv(gym.Env):
         mujoco.mj_setConst(self.model, self.data)
 
         rng = self.np_random
-        # Start NEAR upright with some velocity -- the catch scenario.
-        self.data.qpos[1] = float(rng.uniform(-self._start_angle, self._start_angle))   # elbow ~ upright
-        self.data.qvel[1] = float(rng.uniform(-self._start_vel, self._start_vel))
+        # Start NEAR upright with some velocity -- the catch scenario. The
+        # curriculum ramps the spread from near-rest (easy) to full (hard).
+        prog = self._curriculum_progress if self._curriculum else 1.0
+        start_angle = self._start_angle_floor + prog * (self._start_angle - self._start_angle_floor)
+        start_vel = self._start_vel_floor + prog * (self._start_vel - self._start_vel_floor)
+        self.data.qpos[1] = float(rng.uniform(-start_angle, start_angle))   # elbow ~ upright
+        self.data.qvel[1] = float(rng.uniform(-start_vel, start_vel))
         self.data.qpos[0] = float(rng.uniform(-np.deg2rad(60.0), np.deg2rad(60.0)))      # random arm
         self.data.qvel[0] = 0.0
         self.data.qfrc_applied[:] = 0.0

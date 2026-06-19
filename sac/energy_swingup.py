@@ -60,11 +60,11 @@ class EnergySwingUp:
         self.k_center       = float(k_center)
         self.k_brake        = float(k_brake)
         self.brake_umax     = float(brake_umax)
-        self.E_ref          = -self.M_ROD * self.G * self.L_CM
+        self.E_ref          = self.M_ROD * self.G * self.L_CM   # energy at upright rest
 
     def pendulum_energy(self, cos_th: float, th_dot: float) -> float:
-        """Mechanical energy with theta=0 at upright."""
-        return 0.5 * self.I_ROD * th_dot**2 - self.M_ROD * self.G * self.L_CM * cos_th
+        """Mechanical energy, potential MAX at upright (cos theta = +1)."""
+        return 0.5 * self.I_ROD * th_dot**2 + self.M_ROD * self.G * self.L_CM * cos_th
 
     def __call__(self, obs: np.ndarray) -> float:
         """
@@ -74,7 +74,10 @@ class EnergySwingUp:
         cos_th, _sin_th, th_dot, phi, _phi_dot = map(float, obs)
 
         E  = self.pendulum_energy(cos_th, th_dot)
-        dE = E - self.E_ref   # >= 0; zero only at the upright equilibrium
+        # Energy DEFICIT: dE>0 -> needs energy (pump); dE<0 -> excess energy at/near
+        # the top (brake). With the old wrong-sign energy, dE was always >=0 so the
+        # brake never fired and the swing-up always over-energized.
+        dE = self.E_ref - E
 
         if self.k_brake > 0.0:
             # Asymmetric Åström: pump gently when below target, brake hard when above.

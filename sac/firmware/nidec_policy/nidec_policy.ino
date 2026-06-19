@@ -34,7 +34,7 @@
 #define AS5600_MAGNITUDE_H 0x1B
 #define SDA_PIN 21
 #define SCL_PIN 22
-const int UPRIGHT_RAW = 3977;          // recalibrated: hanging read -167.2deg, corrected +12.8deg
+const int UPRIGHT_RAW = 477;           // recalibrated: hanging read 127.6deg -> raw_hang~2525, set so hang=+-180
 const int AS5600_MAX_RAW_STEP = 768;   // reject impossible >67.5deg jumps per sample
 const unsigned long AS5600_HEALTH_MS = 500;
 
@@ -45,7 +45,7 @@ const unsigned long AS5600_HEALTH_MS = 500;
 const int PWM_FREQ = 20000;
 const int PWM_RES_BITS = 8;
 const int PWM_STOP = 255;              // 100% duty = stop
-const float MAX_SPEED = 0.25;          // |u|=1 -> 25% speed
+const float MAX_SPEED = 0.40;          // |u|=1 -> 40% drive (was 0.25; more catch authority)
 const float MIN_SPEED = 0.06;          // deadband comp: smallest moving speed (~5% measured)
 
 // --- Nidec quadrature encoder (phi) ---

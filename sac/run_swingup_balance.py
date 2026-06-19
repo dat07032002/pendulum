@@ -95,8 +95,8 @@ def main() -> int:
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--best", action="store_true")
     parser.add_argument("--port", default="COM5")
-    parser.add_argument("--k-energy",       type=float, default=15.0,
-                        help="Energy-pump gain (raise if pendulum won't reach upright)")
+    parser.add_argument("--k-energy",       type=float, default=2.5,
+                        help="Energy-pump gain (2.5 at MAX_SPEED=0.40; raise if won't reach upright)")
     parser.add_argument("--swingup-umax",   type=float, default=0.8,
                         help="Arm command ceiling during swing-up [0..1]")
     parser.add_argument("--phi-swing-deg",  type=float, default=80.0,
@@ -107,10 +107,13 @@ def main() -> int:
                         help="Enter balance when |theta| < this [deg]")
     parser.add_argument("--switch-out-deg", type=float, default=35.0,
                         help="Exit balance when |theta| > this [deg]")
+    parser.add_argument("--switch-vel", type=float, default=9.0,
+                        help="Hand off only when |theta_dot| < this [rad/s]. Set BELOW the typical "
+                             "delivery so the swing-up retries until it hands off a catchable (slow) rod.")
     parser.add_argument("--coast",          type=float, default=0.15,
                         help="Legacy coast fraction (ignored when --brake > 0)")
-    parser.add_argument("--brake",          type=float, default=20.0,
-                        help="Asymmetric brake gain when dE<0 (excess energy). 0=passive coast. Try 15-30.")
+    parser.add_argument("--brake",          type=float, default=7.0,
+                        help="Asymmetric brake gain when dE<0 (excess energy). Tuned to 7 with k_energy=40.")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -178,7 +181,7 @@ def main() -> int:
                 abs_theta = abs(theta)
 
                 # ---- State machine ----
-                if mode == "swingup" and abs_theta < switch_in and abs(th_dot) < 4.0:
+                if mode == "swingup" and abs_theta < switch_in and abs(th_dot) < args.switch_vel:
                     mode = "balance"
                     balance_start = time.time()
                     balance_count += 1

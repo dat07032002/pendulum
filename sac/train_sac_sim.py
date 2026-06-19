@@ -36,7 +36,8 @@ class SimEvalCheckpoint(BaseCallback):
     def __init__(self, run_dir: Path, vec_env: VecNormalize, eval_every: int,
                  action_limit: float, episode_seconds: float, velocity_control: bool = True,
                  start_vel: float = 3.0, start_angle_deg: float = 10.0,
-                 fall_threshold_deg: float = 45.0):
+                 fall_threshold_deg: float = 45.0,
+                 curriculum: bool = False, curriculum_steps: int = 0):
         super().__init__()
         self._run_dir = run_dir
         self._vec_env = vec_env
@@ -47,6 +48,8 @@ class SimEvalCheckpoint(BaseCallback):
         self._start_vel = start_vel
         self._start_angle_deg = start_angle_deg
         self._fall_threshold_deg = fall_threshold_deg
+        self._curriculum = curriculum
+        self._curriculum_steps = curriculum_steps
         self._best_hold = -1.0
         self._last_eval = 0
 
@@ -85,17 +88,22 @@ class SimEvalCheckpoint(BaseCallback):
         return float(np.mean(rewards)), float(np.mean(holds))
 
     def _on_step(self) -> bool:
+        if self._curriculum and self._curriculum_steps > 0:
+            self.training_env.env_method("set_progress",
+                                         min(1.0, self.num_timesteps / self._curriculum_steps))
         if self.num_timesteps - self._last_eval >= self._eval_every:
             self._last_eval = self.num_timesteps
             mean_rew, mean_hold = self._evaluate()
             self._save("latest")
+            prog = min(1.0, self.num_timesteps / self._curriculum_steps) if self._curriculum and self._curriculum_steps else 1.0
+            diff_tag = f"  diff={prog*100:.0f}%" if self._curriculum else ""
             tag = ""
             if mean_hold > self._best_hold:
                 self._best_hold = mean_hold
                 self._save("best")
                 tag = "  <-- new best"
             print(f"[{self.num_timesteps:>8} steps] eval mean_reward={mean_rew:+8.1f}  "
-                  f"mean_hold={mean_hold:.2f}s{tag}", flush=True)
+                  f"mean_hold={mean_hold:.2f}s{diff_tag}{tag}", flush=True)
         return True
 
 
@@ -116,6 +124,10 @@ def main() -> int:
                         help="Max |theta| at episode start [deg] — matches --switch-in-deg on hardware")
     parser.add_argument("--fall-threshold", type=float, default=45.0,
                         help="Terminate episode when |theta| exceeds this [deg] (default 45)")
+    parser.add_argument("--curriculum", action="store_true",
+                        help="Ramp difficulty (arrival speed/angle + DR) easy->hard over training")
+    parser.add_argument("--curriculum-frac", type=float, default=0.5,
+                        help="Ramp to full difficulty over this fraction of total steps (default 0.5)")
     args = parser.parse_args()
 
     domain_rand = not args.no_domain_rand
@@ -136,7 +148,8 @@ def main() -> int:
                                    velocity_control=velocity_control,
                                    start_vel=args.start_vel,
                                    start_angle_deg=args.start_angle,
-                                   fall_threshold_deg=args.fall_threshold)
+                                   fall_threshold_deg=args.fall_threshold,
+                                   curriculum=args.curriculum)
 
     vec_env = DummyVecEnv([make_env for _ in range(args.n_envs)])
 
@@ -166,10 +179,12 @@ def main() -> int:
     else:
         model = SAC("MlpPolicy", vec_env, verbose=0, device="auto", **sac_kwargs)
 
+    curriculum_steps = int(args.curriculum_frac * args.total_steps) if args.curriculum else 0
     cb = SimEvalCheckpoint(run_dir, vec_env, args.eval_every, args.action_limit,
                            args.episode_seconds, velocity_control=velocity_control,
                            start_vel=args.start_vel, start_angle_deg=args.start_angle,
-                           fall_threshold_deg=args.fall_threshold)
+                           fall_threshold_deg=args.fall_threshold,
+                           curriculum=args.curriculum, curriculum_steps=curriculum_steps)
     try:
         model.learn(total_timesteps=args.total_steps, reset_num_timesteps=not args.resume,
                     progress_bar=True, callback=cb)
