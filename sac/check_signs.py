@@ -92,8 +92,8 @@ def analyze(samples: list, label: str) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pulse the motor and verify obs sign/unit consistency.")
     parser.add_argument("--port", default="COM5")
-    parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--u", type=float, default=0.35, help="Pulse magnitude (must exceed motor deadband ~0.235)")
+    parser.add_argument("--baud", type=int, default=921600)
+    parser.add_argument("--u", type=float, default=0.15, help="Pulse magnitude (must exceed firmware zero zone ~0.05)")
     parser.add_argument("--duration", type=float, default=0.35, help="Pulse length in seconds")
     parser.add_argument("--settle", type=float, default=4.0, help="Seconds to wait between pulses")
     args = parser.parse_args()

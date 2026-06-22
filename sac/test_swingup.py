@@ -73,11 +73,13 @@ def main() -> int:
     parser.add_argument("--swingup-umax",  type=float, default=0.8)
     parser.add_argument("--phi-swing-deg", type=float, default=80.0)
     parser.add_argument("--coast",         type=float, default=0.15,
-                        help="Legacy coast fraction (ignored when --brake > 0)")
-    parser.add_argument("--brake",         type=float, default=20.0,
-                        help="Asymmetric brake gain when dE<0 (excess energy). 0=passive coast. Try 15-30.")
-    parser.add_argument("--brake-umax",   type=float, default=0.8,
-                        help="Arm command ceiling during braking (default 0.8)")
+                        help="Coast when energy deficit is below this fraction of the swing-up energy range.")
+    parser.add_argument("--u-floor",       type=float, default=0.0,
+                        help="Optional minimum non-zero swing-up command. Try 0.08 if small commands do nothing.")
+    parser.add_argument("--k-center",      type=float, default=0.15,
+                        help="Arm-centering gain that subtracts k_center*phi from u.")
+    parser.add_argument("--k-arm-damp",    type=float, default=0.0,
+                        help="Arm damping gain that subtracts k_arm_damp*phi_dot from u.")
     parser.add_argument("--stop-deg",      type=float, default=10.0,
                         help="Stop motor when |theta| < this angle [deg] (default 10)")
     args = parser.parse_args()
@@ -87,11 +89,14 @@ def main() -> int:
         u_max=args.swingup_umax,
         phi_limit_deg=args.phi_swing_deg,
         coast_fraction=args.coast,
-        k_brake=args.brake,
-        brake_umax=args.brake_umax,
+        k_center=args.k_center,
+        k_arm_damp=args.k_arm_damp,
+        u_floor=args.u_floor,
     )
 
-    print(f"Connecting to {args.port}  k_energy={args.k_energy}  umax={args.swingup_umax}")
+    print(f"Connecting to {args.port}  k_energy={args.k_energy}  umax={args.swingup_umax}  "
+          f"coast={args.coast}  u_floor={args.u_floor}  k_center={args.k_center}  "
+          f"k_arm_damp={args.k_arm_damp}")
     with serial.Serial(args.port, 921600, timeout=0.05) as ser:
         time.sleep(2.0)
         ser.write(b"z\n")
@@ -135,9 +140,15 @@ def main() -> int:
 
                 u = swingup(obs)
                 ser.write(f"u {u:.4f}\n".encode())
+                energy = swingup.pendulum_energy(float(cos_th), float(th_dot))
+                dE = swingup.E_ref - energy
+                if dE < args.coast * swingup.E_max:
+                    mode = "coast"
+                else:
+                    mode = "pump"
 
                 print(f"theta={theta_deg:+6.1f}deg  phi={np.degrees(phi):+6.1f}deg  "
-                      f"th_dot={th_dot:+5.1f}  u={u:+5.2f}", end="\r")
+                      f"th_dot={th_dot:+5.1f}  dE={dE:+.4f}  {mode:5s}  u={u:+5.2f}", end="\r")
 
                 wait = CONTROL_DT - (time.perf_counter() - t0)
                 if wait > 0:

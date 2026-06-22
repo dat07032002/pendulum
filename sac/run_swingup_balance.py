@@ -3,7 +3,7 @@ Swing-up + balance controller for the Furuta pendulum.
 
   Swing-up  : Åström energy pump (no training needed — pure physics).
   Balance   : Trained SAC policy loaded from a sim training run.
-  Switching : |theta| < SWITCH_IN  -> balance
+  Switching : upper-angle region + upright-energy match -> balance
               |theta| > SWITCH_OUT -> back to swing-up
 
 Usage:
@@ -14,8 +14,9 @@ Tuning flags (start with defaults, adjust on hardware):
   --k-energy        energy-pump gain      (default 15 — raise if won't reach upright)
   --swingup-umax    swing-up arm ceiling  (default 0.8)
   --phi-swing-deg   arm travel during swing-up (default 80 deg)
-  --switch-in-deg   enter balance angle   (default 20 deg)
-  --switch-out-deg  exit balance angle    (default 35 deg)
+  --switch-in-deg   upper hand-off angle  (default 30 deg)
+  --switch-dE       upright-energy match  (default 0.08 of energy range)
+  --switch-out-deg  exit balance angle    (default 45 deg)
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 sys.path.insert(0, str(Path(__file__).parent))
 from energy_swingup import EnergySwingUp
 from sim_balance_env import FurutaBalanceSimEnv
+from lqr_balance import LQRBalance
 
 OBS_RE = re.compile(r"obs=\[([^\]]+)\]")
 CONTROL_HZ = 100
@@ -92,7 +94,11 @@ def load_balance_policy(model_dir: Path, best: bool):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Swing-up + balance for Furuta pendulum.")
-    parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--lqr", action="store_true",
+                        help="Use the analytic LQR+observer balancer instead of a SAC policy "
+                             "(no model needed; immune to the SAC training collapse).")
+    parser.add_argument("--model-dir", default=None,
+                        help="SAC run directory (required unless --lqr).")
     parser.add_argument("--best", action="store_true")
     parser.add_argument("--port", default="COM5")
     parser.add_argument("--k-energy",       type=float, default=2.5,
@@ -103,34 +109,54 @@ def main() -> int:
                         help="Arm travel limit during swing-up [deg]")
     parser.add_argument("--balance-limit",  type=float, default=1.0,
                         help="SAC action clamp for balance [0..1]")
-    parser.add_argument("--switch-in-deg",  type=float, default=20.0,
-                        help="Enter balance when |theta| < this [deg]")
-    parser.add_argument("--switch-out-deg", type=float, default=35.0,
-                        help="Exit balance when |theta| > this [deg]")
-    parser.add_argument("--switch-vel", type=float, default=9.0,
-                        help="Hand off only when |theta_dot| < this [rad/s]. Set BELOW the typical "
-                             "delivery so the swing-up retries until it hands off a catchable (slow) rod.")
+    parser.add_argument("--switch-in-deg",  type=float, default=30.0,
+                        help="Upper region: only consider handing off when |theta| < this [deg]. "
+                             "Must match the SAC training start-angle.")
+    parser.add_argument("--switch-out-deg", type=float, default=45.0,
+                        help="Exit balance when |theta| > this [deg]; keep above switch-in for hysteresis.")
+    parser.add_argument("--dwell-in", type=int, default=2,
+                        help="Consecutive loops the handoff gate must hold before switching to "
+                             "balance. Keep small (catch window is brief).")
+    parser.add_argument("--dwell-out", type=int, default=3,
+                        help="Consecutive loops past switch-out before returning to swing-up. "
+                             "Rejects single noisy samples that look like a fall.")
+    parser.add_argument("--switch-dE", type=float, default=0.08,
+                        help="ENERGY hand-off gate: switch when |E - E_upright| < this fraction of the "
+                             "swing-up energy range. Small = only hand off an energy-matched (slow-arriving) "
+                             "rod. This is the region-of-attraction criterion; tune on hardware (0.05-0.12).")
     parser.add_argument("--coast",          type=float, default=0.15,
-                        help="Legacy coast fraction (ignored when --brake > 0)")
-    parser.add_argument("--brake",          type=float, default=7.0,
-                        help="Asymmetric brake gain when dE<0 (excess energy). Tuned to 7 with k_energy=40.")
+                        help="Coast when energy deficit is below this fraction of the swing-up energy range.")
+    parser.add_argument("--u-floor",        type=float, default=0.0,
+                        help="Optional minimum non-zero swing-up command. Use the value tuned in test_swingup.py.")
+    parser.add_argument("--k-center",       type=float, default=0.15,
+                        help="Swing-up arm-centering gain that subtracts k_center*phi from u.")
+    parser.add_argument("--k-arm-damp",     type=float, default=0.0,
+                        help="Swing-up arm damping gain that subtracts k_arm_damp*phi_dot from u.")
     args = parser.parse_args()
 
-    model_dir = Path(args.model_dir)
-    if not model_dir.is_absolute():
-        model_dir = Path(__file__).parent / model_dir
-
-    print(f"Loading balance policy: {model_dir} ({'best' if args.best else 'latest'})...")
-    model, vec_norm = load_balance_policy(model_dir, args.best)
-    print(f"  Loaded ({model.num_timesteps:,} training steps)")
+    model = vec_norm = lqr = None
+    if args.lqr:
+        print("Building LQR + observer balance controller (analytic, no model)...")
+        lqr = LQRBalance(action_limit=args.balance_limit)
+        print(f"  LQR gain K = {np.round(lqr.K.flatten(), 3)}")
+    else:
+        if args.model_dir is None:
+            parser.error("--model-dir is required unless --lqr is given")
+        model_dir = Path(args.model_dir)
+        if not model_dir.is_absolute():
+            model_dir = Path(__file__).parent / model_dir
+        print(f"Loading balance policy: {model_dir} ({'best' if args.best else 'latest'})...")
+        model, vec_norm = load_balance_policy(model_dir, args.best)
+        print(f"  Loaded ({model.num_timesteps:,} training steps)")
 
     swingup = EnergySwingUp(
         k_e=args.k_energy,
         u_max=args.swingup_umax,
         phi_limit_deg=args.phi_swing_deg,
         coast_fraction=args.coast,
-        k_brake=args.brake,
-        brake_umax=0.8,
+        k_center=args.k_center,
+        k_arm_damp=args.k_arm_damp,
+        u_floor=args.u_floor,
     )
 
     switch_in  = np.deg2rad(args.switch_in_deg)
@@ -138,6 +164,7 @@ def main() -> int:
 
     print(f"\nSwitch IN  (-> balance) : |theta| < {args.switch_in_deg:.0f} deg")
     print(f"Switch OUT (-> swing-up): |theta| > {args.switch_out_deg:.0f} deg")
+    print(f"Energy gate            : |E - E_upright| < {args.switch_dE:.3f} E_max")
     print(f"Connecting to {args.port} at 921600 baud...")
 
     with serial.Serial(args.port, 921600, timeout=0.05) as ser:
@@ -150,12 +177,15 @@ def main() -> int:
         print("\nArm encoder zeroed. Starting swing-up (pendulum should be hanging).")
         print("Ctrl+C to stop.\n")
 
-        mode          = "swingup"
-        balance_start = 0.0
-        best_hold     = 0.0
-        balance_count = 0
-        obs_miss      = 0
-        last_obs      = None
+        mode           = "swingup"
+        balance_start  = 0.0
+        best_hold      = 0.0
+        balance_count  = 0
+        obs_miss       = 0
+        last_obs       = None
+        in_count       = 0      # consecutive loops the handoff gate has held
+        out_count      = 0      # consecutive loops past switch-out
+        last_balance_u = 0.0    # previous SAC command, fed back as the obs channel
 
         try:
             while True:
@@ -181,26 +211,53 @@ def main() -> int:
                 abs_theta = abs(theta)
 
                 # ---- State machine ----
-                if mode == "swingup" and abs_theta < switch_in and abs(th_dot) < args.switch_vel:
-                    mode = "balance"
-                    balance_start = time.time()
-                    balance_count += 1
-                    print(f"  [{balance_count}] -> BALANCE  "
-                          f"theta={np.degrees(theta):+5.1f}deg  "
-                          f"th_dot={th_dot:+5.1f} rad/s")
+                # ENERGY-based hand-off (region-of-attraction criterion): switch when
+                # the rod is in the upper region AND has ~the upright energy, so it will
+                # arrive/stay slow. Catches the energy-matched states the policy can hold
+                # -- including a rising rod at a wide angle (catch-on-the-way-up) -- not a
+                # fixed velocity that's in a dead zone for fast deliveries.
+                energy = swingup.pendulum_energy(cos_th, th_dot)
+                dE = swingup.E_ref - energy
+                energy_matched = abs(dE) < args.switch_dE * swingup.E_max
+                enter_ok = abs_theta < switch_in and energy_matched
+                exit_ok  = abs_theta > switch_out
 
-                elif mode == "balance" and abs_theta > switch_out:
-                    hold = time.time() - balance_start
-                    best_hold = max(best_hold, hold)
-                    print(f"  [{balance_count}] -> SWING-UP  "
-                          f"held={hold:.2f}s  best={best_hold:.2f}s")
-                    mode = "swingup"
+                # Dwell time: require the gate to hold for a few consecutive loops
+                # so a single noisy sample never triggers a switch.
+                if mode == "swingup":
+                    in_count = in_count + 1 if enter_ok else 0
+                    if in_count >= args.dwell_in:
+                        mode = "balance"
+                        balance_start = time.time()
+                        balance_count += 1
+                        last_balance_u = 0.0
+                        out_count = 0
+                        if lqr is not None:
+                            lqr.reset()   # restart the observer for this catch
+                        print(f"  [{balance_count}] -> BALANCE  "
+                              f"theta={np.degrees(theta):+5.1f}deg  "
+                              f"th_dot={th_dot:+5.1f} rad/s  dE={dE:+.4f}")
+                else:  # balance
+                    out_count = out_count + 1 if exit_ok else 0
+                    if out_count >= args.dwell_out:
+                        hold = time.time() - balance_start
+                        best_hold = max(best_hold, hold)
+                        print(f"  [{balance_count}] -> SWING-UP  "
+                              f"held={hold:.2f}s  best={best_hold:.2f}s")
+                        mode = "swingup"
+                        in_count = 0
 
                 # ---- Control ----
                 if mode == "balance":
-                    nobs = vec_norm.normalize_obs(obs.reshape(1, -1))
-                    action, _ = model.predict(nobs, deterministic=True)
-                    u = float(np.clip(action.flat[0], -args.balance_limit, args.balance_limit))
+                    if lqr is not None:
+                        u = lqr(obs)
+                    else:
+                        # Append the previous SAC command to match the 6-D training obs.
+                        obs6 = np.append(obs, np.float32(last_balance_u))
+                        nobs = vec_norm.normalize_obs(obs6.reshape(1, -1))
+                        action, _ = model.predict(nobs, deterministic=True)
+                        u = float(np.clip(action.flat[0], -args.balance_limit, args.balance_limit))
+                    last_balance_u = u
                 else:
                     u = swingup(obs)
 
